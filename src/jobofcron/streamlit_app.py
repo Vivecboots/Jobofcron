@@ -1010,6 +1010,7 @@ def _render_documents_tab() -> None:
     )
     use_ai = st.session_state.get(use_ai_state_key, use_ai_default)
 
+
     def _ensure_ai_model_session(provider: str) -> str:
         key = f"ai_model_{provider}"
         if key not in st.session_state:
@@ -1044,6 +1045,7 @@ def _render_documents_tab() -> None:
     if use_ai:
         st.markdown("### AI configuration")
         st.selectbox(
+
             "AI provider",
             provider_choices,
             key=ai_provider_state_key,
