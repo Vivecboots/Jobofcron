@@ -1010,6 +1010,90 @@ def _render_documents_tab() -> None:
     )
     use_ai = st.session_state.get(use_ai_state_key, use_ai_default)
 
+
+    def _ensure_ai_model_session(provider: str) -> str:
+        key = f"ai_model_{provider}"
+        if key not in st.session_state:
+            st.session_state[key] = PROVIDER_DEFAULT_MODELS.get(provider, "gpt-4o-mini")
+        return key
+
+    def _ensure_ai_api_key_session(provider: str) -> str:
+        key = f"ai_api_key_{provider}"
+        if key not in st.session_state:
+            st.session_state[key] = _env_value_for_provider(provider)
+        return key
+
+    ai_provider_state_key = "documents_ai_provider"
+    if (
+        ai_provider_state_key not in st.session_state
+        or st.session_state[ai_provider_state_key] not in provider_choices
+    ):
+        st.session_state[ai_provider_state_key] = default_provider
+
+    prompt_style_state_key = "documents_ai_prompt_style"
+    default_prompt_style = "general" if "general" in prompt_styles else prompt_styles[0]
+    if (
+        prompt_style_state_key not in st.session_state
+        or st.session_state[prompt_style_state_key] not in prompt_styles
+    ):
+        st.session_state[prompt_style_state_key] = default_prompt_style
+
+    temperature_state_key = "documents_ai_temperature"
+    if temperature_state_key not in st.session_state:
+        st.session_state[temperature_state_key] = 0.3
+
+    if use_ai:
+        st.markdown("### AI configuration")
+        st.selectbox(
+
+            "AI provider",
+            provider_choices,
+            key=ai_provider_state_key,
+            help="Select the provider to use for automated document drafting.",
+        )
+        ai_provider = st.session_state[ai_provider_state_key]
+        model_key = _ensure_ai_model_session(ai_provider)
+        key_key = _ensure_ai_api_key_session(ai_provider)
+        st.selectbox(
+            "AI prompt focus",
+            prompt_styles,
+            key=prompt_style_state_key,
+            help="Tailor output for technical, sales, customer success, leadership, and other role families.",
+        )
+        model_default = PROVIDER_DEFAULT_MODELS.get(ai_provider, "gpt-4o-mini")
+        st.text_input(
+            "AI model",
+            key=model_key,
+            help=f"Suggested default: {model_default}",
+        )
+        st.slider(
+            "AI creativity",
+            min_value=0.0,
+            max_value=1.0,
+            step=0.05,
+            key=temperature_state_key,
+        )
+        st.text_input(
+            "AI API key",
+            type="password",
+            key=key_key,
+        )
+    else:
+        ai_provider = st.session_state[ai_provider_state_key]
+        model_key = _ensure_ai_model_session(ai_provider)
+        key_key = _ensure_ai_api_key_session(ai_provider)
+        st.caption(
+            "Enable the AI generator above to configure the provider, prompt focus, model, creativity, and API key.",
+        )
+
+    ai_provider = st.session_state[ai_provider_state_key]
+    model_key = _ensure_ai_model_session(ai_provider)
+    key_key = _ensure_ai_api_key_session(ai_provider)
+    ai_style = st.session_state[prompt_style_state_key]
+    ai_model = st.session_state[model_key]
+    ai_temperature = float(st.session_state[temperature_state_key])
+    ai_key = st.session_state[key_key]
+
     with st.form("documents_form"):
         title = st.text_input("Job title", value=selected.title if selected else "")
         company = st.text_input("Company", value="")
@@ -1023,47 +1107,6 @@ def _render_documents_tab() -> None:
             height=220,
         )
         tags_text = st.text_input("Tags", value="")
-        provider_index = provider_choices.index(default_provider)
-        ai_provider = st.selectbox(
-            "AI provider",
-            provider_choices,
-            index=provider_index,
-            disabled=not use_ai,
-        )
-        prompt_index = prompt_styles.index("general") if "general" in prompt_styles else 0
-        ai_style = st.selectbox(
-            "AI prompt focus",
-            prompt_styles,
-            index=prompt_index,
-            disabled=not use_ai,
-            help="Tailor output for technical, sales, customer success, leadership, and other role families.",
-        )
-        model_key = f"ai_model_{ai_provider}"
-        model_default = PROVIDER_DEFAULT_MODELS.get(ai_provider, "gpt-4o-mini")
-        ai_model = st.text_input(
-            "AI model",
-            value=st.session_state.get(model_key, model_default),
-            disabled=not use_ai,
-            key=model_key,
-            help=f"Suggested default: {model_default}",
-        )
-        ai_temperature = st.slider(
-            "AI creativity",
-            min_value=0.0,
-            max_value=1.0,
-            value=0.3,
-            step=0.05,
-            disabled=not use_ai,
-        )
-        key_key = f"ai_api_key_{ai_provider}"
-        ai_key = st.text_input(
-            "AI API key",
-            value=st.session_state.get(key_key, _env_value_for_provider(ai_provider)),
-            type="password",
-            disabled=not use_ai,
-            key=key_key,
-
-        )
         output_dir = st.text_input("Output directory", value="generated_documents")
         enqueue = st.checkbox("Add to queue", value=False)
         schedule_time = datetime.now()
