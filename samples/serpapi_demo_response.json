@@ -1,0 +1,28 @@
+{
+  "organic_results": [
+    {
+      "title": "Customer Success Manager - Acme Corp Careers",
+      "link": "https://careers.acme.com/jobs/customer-success-manager",
+      "snippet": "Lead onboarding and retention programs for Acme's enterprise customers.",
+      "position": 1
+    },
+    {
+      "title": "Customer Success Manager - Globex",
+      "link": "https://jobs.globex.com/customer-success-manager",
+      "snippet": "Partner with product and support teams to drive adoption.",
+      "position": 2
+    },
+    {
+      "title": "Customer Success Manager Job in Austin, TX - Indeed",
+      "link": "https://www.indeed.com/viewjob?jk=123456",
+      "snippet": "Apply on Indeed for the latest customer success openings.",
+      "position": 3
+    },
+    {
+      "title": "Customer Success Manager - Remote - Example Company",
+      "link": "https://example.com/careers/customer-success-manager",
+      "snippet": "Remote-first SaaS company seeking experienced CSMs.",
+      "position": 4
+    }
+  ]
+}
