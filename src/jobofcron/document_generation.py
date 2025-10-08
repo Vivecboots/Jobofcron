@@ -18,6 +18,7 @@ class DocumentGenerationError(RuntimeError):
     """Raised when an AI provider fails to generate content."""
 
 
+
 SPECIALTY_PROMPTS: Dict[str, Dict[str, str]] = {
     "general": {
         "resume": "Craft a targeted one-page resume in Markdown. Use concise bullet points and highlight quantifiable impact.",
@@ -77,6 +78,7 @@ SPECIALTY_PROMPTS: Dict[str, Dict[str, str]] = {
         ),
     },
 }
+
 
 
 def _format_contact_block(profile: CandidateProfile) -> List[str]:
@@ -470,19 +472,24 @@ class AIDocumentGenerator:
         model: str = "gpt-4o-mini",
         temperature: float = 0.3,
         system_prompt: Optional[str] = None,
+
         provider: str = "openai",
         prompt_style: str = "general",
         max_output_tokens: int = 1200,
+
     ) -> None:
         self._explicit_api_key = api_key
         self.model = model
         self.temperature = temperature
+
         self.provider = provider.lower()
         self.prompt_style = prompt_style if prompt_style in SPECIALTY_PROMPTS else "general"
+
         self.system_prompt = system_prompt or (
             "You are an expert career coach who writes concise, accomplishment-focused job application materials. "
             "Always return valid Markdown and emphasise the candidate's demonstrable impact."
         )
+
         self.max_output_tokens = max_output_tokens
 
     @staticmethod
@@ -514,11 +521,13 @@ class AIDocumentGenerator:
             env_hint = " or ".join(candidate_envs) if candidate_envs else "an environment variable"
             raise DocumentGenerationDependencyError(
                 f"Set {env_hint} or pass api_key to AIDocumentGenerator for provider '{self.provider}'."
+
             )
         return api_key
 
     def _build_client(self):
         api_key = self._resolve_api_key()
+
         provider = self.provider
         if provider == "openai":
             try:  # Preferred modern SDK path
@@ -545,14 +554,17 @@ class AIDocumentGenerator:
         if provider == "cohere":
             try:
                 import cohere  # type: ignore
+
             except ModuleNotFoundError as exc:  # pragma: no cover - optional dependency
                 raise DocumentGenerationDependencyError(
                     "Install the 'ai' optional dependency group (pip install jobofcron[ai])."
                 ) from exc
+
             return provider, cohere.Client(api_key), None
         raise DocumentGenerationDependencyError(
             f"Unsupported AI provider '{self.provider}'. Supported providers: {', '.join(self.available_providers())}."
         )
+
 
     def _profile_summary(self, profile: CandidateProfile) -> str:
         experiences = []
@@ -603,6 +615,7 @@ class AIDocumentGenerator:
         )
 
     def _chat(self, prompt: str) -> str:
+
         provider, client, mode = self._build_client()
         try:
             if provider == "openai":
@@ -649,6 +662,7 @@ class AIDocumentGenerator:
                 raise DocumentGenerationDependencyError(
                     f"Unsupported provider '{provider}' configured at runtime."
                 )
+
         except Exception as exc:  # pragma: no cover - depends on network/service
             raise DocumentGenerationError(f"AI document generation failed: {exc}") from exc
 
@@ -660,9 +674,11 @@ class AIDocumentGenerator:
         posting: JobPosting,
         assessment: MatchAssessment,
     ) -> str:
+
         specialty = SPECIALTY_PROMPTS.get(self.prompt_style, SPECIALTY_PROMPTS["general"])  # type: ignore[index]
         prompt = (
             f"{specialty['resume']}\n\n"
+
             "Candidate details:\n"
             f"{self._profile_summary(profile)}\n\n"
             "Job posting details:\n"
@@ -677,9 +693,11 @@ class AIDocumentGenerator:
         posting: JobPosting,
         assessment: MatchAssessment,
     ) -> str:
+
         specialty = SPECIALTY_PROMPTS.get(self.prompt_style, SPECIALTY_PROMPTS["general"])  # type: ignore[index]
         prompt = (
             f"{specialty['cover_letter']}\n\n"
+
             "Candidate details:\n"
             f"{self._profile_summary(profile)}\n\n"
             "Job posting details:\n"

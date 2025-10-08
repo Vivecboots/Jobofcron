@@ -2,12 +2,14 @@
 from __future__ import annotations
 
 import asyncio
+
 from concurrent.futures import ThreadPoolExecutor
 import random
 import smtplib
 from email.message import EmailMessage
 from pathlib import Path
 from typing import Iterable, Mapping, Optional
+
 from urllib.parse import parse_qs, urlparse
 
 from .job_matching import JobPosting
@@ -16,6 +18,7 @@ from .profile import CandidateProfile
 
 class AutomationDependencyError(RuntimeError):
     """Raised when the optional automation dependencies are missing."""
+
 
 
 DEFAULT_USER_AGENTS = (
@@ -54,6 +57,7 @@ class DirectApplyAutomation:
         self.locale = locale
         self.timezone = timezone
 
+
     def apply(
         self,
         profile: CandidateProfile,
@@ -81,6 +85,7 @@ class DirectApplyAutomation:
             print("[dry-run] Would launch browser and submit application to", posting.apply_url)
             return True
 
+
         def _runner() -> bool:
             return asyncio.run(
                 self._apply_async(
@@ -101,6 +106,7 @@ class DirectApplyAutomation:
             future = executor.submit(_runner)
             return future.result()
 
+
     async def _apply_async(
         self,
         profile: CandidateProfile,
@@ -119,6 +125,7 @@ class DirectApplyAutomation:
             ) from exc
 
         async with async_playwright() as playwright:
+
             browser = await playwright.chromium.launch(
                 headless=self.headless,
                 args=[
@@ -166,6 +173,7 @@ class DirectApplyAutomation:
             finally:
                 if context is not None:
                     await context.close()
+
                 await browser.close()
 
     def _select_handler(self, url: str):
@@ -174,6 +182,7 @@ class DirectApplyAutomation:
             return self._apply_greenhouse
         if "lever.co" in domain:
             return self._apply_lever
+
         if "workday" in domain or "myworkdayjobs" in domain:
             return self._apply_workday
         if "icims.com" in domain:
@@ -236,6 +245,7 @@ class DirectApplyAutomation:
             except Exception:
                 continue
         return False
+
 
     async def _apply_generic(
         self,
@@ -325,6 +335,7 @@ class DirectApplyAutomation:
             return True
         except Exception:
             return await self._submit_application(page)
+
 
     async def _apply_workday(
         self,
@@ -480,6 +491,7 @@ class DirectApplyAutomation:
         await page.wait_for_timeout(500)
         return await self._submit_application(page)
 
+
     async def _fill_contact_info(self, page, profile: CandidateProfile) -> None:
         fields = {
             "name": profile.name,
@@ -492,6 +504,7 @@ class DirectApplyAutomation:
         for label, value in fields.items():
             if not value:
                 continue
+
             for context in self._all_contexts(page):
                 locator = context.get_by_label(label, exact=False)
                 try:
@@ -561,6 +574,7 @@ class DirectApplyAutomation:
                         return True
                     except Exception:
                         continue
+
         return False
 
 

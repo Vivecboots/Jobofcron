@@ -57,6 +57,7 @@ else:
     from .storage import Storage
 
 
+
 PROVIDER_DEFAULT_MODELS = {
     "openai": "gpt-4o-mini",
     "anthropic": "claude-3-sonnet-20240229",
@@ -79,6 +80,7 @@ def _env_value_for_provider(provider: str) -> str:
         if value:
             return value
     return ""
+
 
 DEFAULT_STORAGE = Path(os.getenv("JOBOFCRON_STORAGE", "jobofcron_data.json"))
 
@@ -985,6 +987,7 @@ def _render_documents_tab() -> None:
     if selection != "Manual entry":
         selected = results[options.index(selection) - 1]
 
+
     provider_choices = AIDocumentGenerator.available_providers() or ["openai"]
     prompt_styles = AIDocumentGenerator.available_prompt_styles() or ["general"]
     default_provider = _detect_default_ai_provider()
@@ -995,6 +998,7 @@ def _render_documents_tab() -> None:
         for provider in provider_choices
         for env_var in AIDocumentGenerator.provider_env_keys(provider)
     )
+
 
     with st.form("documents_form"):
         title = st.text_input("Job title", value=selected.title if selected else "")
@@ -1011,6 +1015,7 @@ def _render_documents_tab() -> None:
         tags_text = st.text_input("Tags", value="")
         use_ai = st.checkbox(
             "Use AI generator",
+
             value=has_ai_env,
             help="Requires the ai optional dependencies and an API key for the selected provider.",
         )
@@ -1053,6 +1058,7 @@ def _render_documents_tab() -> None:
             type="password",
             disabled=not use_ai,
             key=key_key,
+
         )
         output_dir = st.text_input("Output directory", value="generated_documents")
         enqueue = st.checkbox("Add to queue", value=False)
@@ -1142,6 +1148,7 @@ def _render_documents_tab() -> None:
     cover_text: str
     if use_ai:
         try:
+
             model_name = (ai_model or "").strip() or PROVIDER_DEFAULT_MODELS.get(ai_provider, "gpt-4o-mini")
             generator = AIDocumentGenerator(
                 api_key=ai_key or None,
@@ -1150,6 +1157,7 @@ def _render_documents_tab() -> None:
                 provider=ai_provider,
                 prompt_style=ai_style,
             )
+
         except DocumentGenerationDependencyError as exc:
             st.error(str(exc))
             return
@@ -1202,9 +1210,11 @@ def _render_documents_tab() -> None:
             custom_cover_letter_template=cover_custom_text if cover_choice == "custom" else None,
         )
         if use_ai and generator:
+
             queued.notes.append(
                 f"Documents generated with {ai_provider} ({generator.model}, style={ai_style})."
             )
+
         queue.add(queued)
         st.success(f"Queued {queued.job_id} for {schedule_time.isoformat(timespec='minutes')}.")
 
