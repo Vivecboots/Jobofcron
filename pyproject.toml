@@ -13,5 +13,10 @@ dependencies = [
     "requests>=2.31",
 ]
 
+[project.optional-dependencies]
+automation = [
+    "playwright>=1.44",
+]
+
 [tool.setuptools.packages.find]
 where = ["src"]

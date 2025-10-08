@@ -1,0 +1,171 @@
+"""Automation helpers for submitting applications on company sites."""
+from __future__ import annotations
+
+import asyncio
+from pathlib import Path
+from typing import Mapping, Optional
+
+from .job_matching import JobPosting
+from .profile import CandidateProfile
+
+
+class AutomationDependencyError(RuntimeError):
+    """Raised when the optional automation dependencies are missing."""
+
+
+class DirectApplyAutomation:
+    """Drive a Playwright browser session to submit job applications."""
+
+    def __init__(self, *, headless: bool = True, timeout: int = 90) -> None:
+        self.headless = headless
+        self.timeout = timeout
+
+    def apply(
+        self,
+        profile: CandidateProfile,
+        posting: JobPosting,
+        *,
+        resume_path: Optional[Path] = None,
+        cover_letter_path: Optional[Path] = None,
+        answers: Optional[Mapping[str, str]] = None,
+        dry_run: bool = False,
+    ) -> bool:
+        """Submit an application, returning ``True`` if a submission was attempted."""
+
+        if not posting.apply_url:
+            raise ValueError("Job posting is missing an apply URL")
+
+        resume_path = Path(resume_path) if resume_path else None
+        cover_letter_path = Path(cover_letter_path) if cover_letter_path else None
+
+        if resume_path and not resume_path.exists():
+            raise FileNotFoundError(f"Resume file does not exist: {resume_path}")
+        if cover_letter_path and not cover_letter_path.exists():
+            raise FileNotFoundError(f"Cover letter file does not exist: {cover_letter_path}")
+
+        if dry_run:
+            print("[dry-run] Would launch browser and submit application to", posting.apply_url)
+            return True
+
+        return asyncio.run(
+            self._apply_async(
+                profile,
+                posting,
+                resume_path=resume_path,
+                cover_letter_path=cover_letter_path,
+                answers=answers or {},
+            )
+        )
+
+    async def _apply_async(
+        self,
+        profile: CandidateProfile,
+        posting: JobPosting,
+        *,
+        resume_path: Optional[Path],
+        cover_letter_path: Optional[Path],
+        answers: Mapping[str, str],
+    ) -> bool:
+        try:
+            from playwright.async_api import TimeoutError as PlaywrightTimeoutError
+            from playwright.async_api import async_playwright
+        except ModuleNotFoundError as exc:  # pragma: no cover - optional dependency
+            raise AutomationDependencyError(
+                "Install the 'automation' optional dependency group (pip install jobofcron[automation])"
+            ) from exc
+
+        async with async_playwright() as playwright:
+            browser = await playwright.chromium.launch(headless=self.headless)
+            page = await browser.new_page()
+            try:
+                await page.goto(posting.apply_url, wait_until="domcontentloaded", timeout=self.timeout * 1000)
+                await self._fill_contact_info(page, profile)
+                if resume_path:
+                    await self._upload_file(page, resume_path, keywords=("resume",))
+                if cover_letter_path:
+                    await self._upload_file(page, cover_letter_path, keywords=("cover", "letter"))
+                if answers:
+                    await self._answer_questions(page, answers)
+                submitted = await self._submit_application(page)
+                return submitted
+            except PlaywrightTimeoutError as exc:
+                raise TimeoutError(f"Timed out while loading or submitting {posting.apply_url}") from exc
+            finally:
+                await browser.close()
+
+    async def _fill_contact_info(self, page, profile: CandidateProfile) -> None:
+        fields = {
+            "name": profile.name,
+            "full name": profile.name,
+            "first name": profile.name.split(" ")[0],
+            "last name": profile.name.split(" ")[-1],
+            "email": profile.email,
+            "phone": profile.phone or "",
+        }
+        for label, value in fields.items():
+            if not value:
+                continue
+            locator = page.get_by_label(label, exact=False)
+            try:
+                if await locator.count() > 0:
+                    await locator.fill(value)
+                    continue
+            except Exception:
+                pass
+            placeholder_locator = page.get_by_placeholder(label, exact=False)
+            try:
+                if await placeholder_locator.count() > 0:
+                    await placeholder_locator.fill(value)
+            except Exception:
+                continue
+
+    async def _upload_file(self, page, file_path: Path, *, keywords: tuple[str, ...]) -> None:
+        file_inputs = page.locator("input[type='file']")
+        count = await file_inputs.count()
+        for index in range(count):
+            input_el = file_inputs.nth(index)
+            name_attr = (await input_el.get_attribute("name") or "").lower()
+            if any(keyword in name_attr for keyword in keywords) or not name_attr:
+                await input_el.set_input_files(str(file_path))
+                return
+        if count:
+            await file_inputs.first.set_input_files(str(file_path))
+
+    async def _answer_questions(self, page, answers: Mapping[str, str]) -> None:
+        for keyword, response in answers.items():
+            locator = page.get_by_label(keyword, exact=False)
+            try:
+                if await locator.count() > 0:
+                    await locator.fill(response)
+                    continue
+            except Exception:
+                pass
+
+            textboxes = page.locator("input[type='text'], textarea")
+            count = await textboxes.count()
+            for index in range(count):
+                box = textboxes.nth(index)
+                placeholder = (await box.get_attribute("placeholder") or "").lower()
+                if keyword.lower() in placeholder:
+                    await box.fill(response)
+                    break
+
+    async def _submit_application(self, page) -> bool:
+        buttons = page.locator("button, input[type='submit']")
+        count = await buttons.count()
+        for index in range(count):
+            button = buttons.nth(index)
+            text = ""
+            try:
+                text = (await button.inner_text()).strip().lower()
+            except Exception:
+                attr = await button.get_attribute("value")
+                if attr:
+                    text = attr.strip().lower()
+            if any(trigger in text for trigger in ("submit", "apply", "send")):
+                try:
+                    await button.click()
+                    return True
+                except Exception:
+                    continue
+        return False
