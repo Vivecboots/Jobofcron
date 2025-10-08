@@ -39,12 +39,21 @@ class JobAutomationWorker:
         retry_delay: timedelta = timedelta(minutes=45),
         ai_generator: Optional[AIDocumentGenerator] = None,
         email_sender: Optional[EmailApplicationSender] = None,
+
+        enable_stealth: bool = True,
+
     ) -> None:
         self.storage = Storage(storage_path)
         self.documents_dir = documents_dir or Path("generated_documents")
         self.documents_dir.mkdir(parents=True, exist_ok=True)
         self.retry_delay = retry_delay
-        self.automation = DirectApplyAutomation(headless=headless, timeout=timeout)
+
+        self.automation = DirectApplyAutomation(
+            headless=headless,
+            timeout=timeout,
+            enable_stealth=enable_stealth,
+        )
+
         self.ai_generator = ai_generator
         self.email_sender = email_sender
 

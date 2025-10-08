@@ -30,6 +30,11 @@ from .worker import JobAutomationWorker
 DEFAULT_STORAGE = Path("jobofcron_data.json")
 
 
+AI_PROVIDER_CHOICES = AIDocumentGenerator.available_providers()
+AI_PROMPT_CHOICES = AIDocumentGenerator.available_prompt_styles()
+
+
+
 def slugify(*parts: str) -> str:
     token = "-".join(part.strip().lower().replace(" ", "-") for part in parts if part)
     cleaned = [ch for ch in token if ch.isalnum() or ch in {"-", "_"}]
@@ -115,10 +120,25 @@ def build_email_sender_from_args(args: argparse.Namespace) -> Optional[EmailAppl
 
 
 def _build_ai_generator(
-    *, api_key: Optional[str], model: str, temperature: float
+
+    *,
+    api_key: Optional[str],
+    model: str,
+    temperature: float,
+    provider: str,
+    prompt_style: str,
+    system_prompt: Optional[str] = None,
 ) -> AIDocumentGenerator:
     try:
-        return AIDocumentGenerator(api_key=api_key, model=model, temperature=temperature)
+        return AIDocumentGenerator(
+            api_key=api_key,
+            model=model,
+            temperature=temperature,
+            provider=provider,
+            prompt_style=prompt_style,
+            system_prompt=system_prompt,
+        )
+
     except DocumentGenerationDependencyError as exc:
         raise SystemExit(str(exc)) from exc
 
@@ -331,6 +351,10 @@ def cmd_generate_documents(args: argparse.Namespace) -> None:
             api_key=args.ai_api_key,
             model=args.ai_model,
             temperature=args.ai_temperature,
+
+            provider=args.ai_provider,
+            prompt_style=args.ai_style,
+
         )
         try:
             resume_text = generator.generate_resume(profile, posting, assessment)
@@ -384,7 +408,11 @@ def cmd_generate_documents(args: argparse.Namespace) -> None:
             custom_cover_letter_template=cover_template_text,
         )
         if args.use_ai:
-            task.notes.append(f"Documents generated with AI model {args.ai_model}.")
+
+            task.notes.append(
+                f"Documents generated with {args.ai_provider} ({args.ai_model}, style={args.ai_style})."
+            )
+
         existing = queue.find_matching(task.posting)
         history_record = history.find(task.posting)
         if existing:
@@ -412,7 +440,13 @@ def _load_description(args: argparse.Namespace) -> str:
 
 def cmd_apply(args: argparse.Namespace) -> None:
     profile, inventory, queue, history, storage = load_or_init(Path(args.storage))
-    automation = DirectApplyAutomation(headless=not args.no_headless, timeout=args.timeout)
+
+    automation = DirectApplyAutomation(
+        headless=not args.no_headless,
+        timeout=args.timeout,
+        enable_stealth=not args.disable_stealth,
+    )
+
     task: Optional[QueuedApplication] = None
     now = datetime.now()
     resume_path: Optional[Path] = None
@@ -460,6 +494,10 @@ def cmd_apply(args: argparse.Namespace) -> None:
                     api_key=args.ai_api_key,
                     model=args.ai_model,
                     temperature=args.ai_temperature,
+
+                    provider=args.ai_provider,
+                    prompt_style=args.ai_style,
+
                 )
                 try:
                     resume_text = generator.generate_resume(profile, posting, assessment)
@@ -648,6 +686,10 @@ def cmd_worker(args: argparse.Namespace) -> None:
             api_key=args.ai_api_key,
             model=args.ai_model,
             temperature=args.ai_temperature,
+
+            provider=args.ai_provider,
+            prompt_style=args.ai_style,
+
         )
     email_sender = build_email_sender_from_args(args)
     worker = JobAutomationWorker(
@@ -658,6 +700,9 @@ def cmd_worker(args: argparse.Namespace) -> None:
         retry_delay=timedelta(minutes=args.retry_minutes),
         ai_generator=ai_generator,
         email_sender=email_sender,
+
+        enable_stealth=not args.disable_stealth,
+
     )
 
     if args.loop:
@@ -995,6 +1040,20 @@ def build_parser() -> argparse.ArgumentParser:
     documents.add_argument("--ai-api-key")
     documents.add_argument("--ai-temperature", type=float, default=0.3)
     documents.add_argument(
+
+        "--ai-provider",
+        choices=AI_PROVIDER_CHOICES,
+        default=AI_PROVIDER_CHOICES[0],
+        help="AI provider to use when generating documents",
+    )
+    documents.add_argument(
+        "--ai-style",
+        choices=AI_PROMPT_CHOICES,
+        default="general",
+        help="Specialised prompt style for AI document generation",
+    )
+    documents.add_argument(
+
         "--resume-template",
         choices=["traditional", "modern", "minimal", "custom"],
         default="traditional",
@@ -1030,6 +1089,19 @@ def build_parser() -> argparse.ArgumentParser:
     apply_cmd.add_argument("--ai-model", default="gpt-4o-mini")
     apply_cmd.add_argument("--ai-api-key")
     apply_cmd.add_argument("--ai-temperature", type=float, default=0.3)
+
+    apply_cmd.add_argument(
+        "--ai-provider",
+        choices=AI_PROVIDER_CHOICES,
+        default=AI_PROVIDER_CHOICES[0],
+    )
+    apply_cmd.add_argument(
+        "--ai-style",
+        choices=AI_PROMPT_CHOICES,
+        default="general",
+    )
+    apply_cmd.add_argument("--disable-stealth", action="store_true", help="Disable Playwright stealth hardening")
+
     apply_cmd.add_argument("--output-dir", default="generated_documents")
     apply_cmd.add_argument(
         "--resume-template",
@@ -1140,6 +1212,19 @@ def build_parser() -> argparse.ArgumentParser:
     worker.add_argument("--ai-model", default="gpt-4o-mini")
     worker.add_argument("--ai-api-key")
     worker.add_argument("--ai-temperature", type=float, default=0.3)
+
+    worker.add_argument(
+        "--ai-provider",
+        choices=AI_PROVIDER_CHOICES,
+        default=AI_PROVIDER_CHOICES[0],
+    )
+    worker.add_argument(
+        "--ai-style",
+        choices=AI_PROMPT_CHOICES,
+        default="general",
+    )
+    worker.add_argument("--disable-stealth", action="store_true", help="Disable Playwright stealth hardening")
+
     worker.add_argument("--email-host")
     worker.add_argument("--email-port", type=int)
     worker.add_argument("--email-username")

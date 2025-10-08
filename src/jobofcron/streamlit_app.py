@@ -56,6 +56,32 @@ else:
     from .skills_inventory import SkillsInventory
     from .storage import Storage
 
+
+
+PROVIDER_DEFAULT_MODELS = {
+    "openai": "gpt-4o-mini",
+    "anthropic": "claude-3-sonnet-20240229",
+    "cohere": "command-r+",
+}
+
+
+def _detect_default_ai_provider() -> str:
+    providers = AIDocumentGenerator.available_providers()
+    for provider in providers:
+        for env_var in AIDocumentGenerator.provider_env_keys(provider):
+            if os.getenv(env_var):
+                return provider
+    return providers[0] if providers else "openai"
+
+
+def _env_value_for_provider(provider: str) -> str:
+    for env_var in AIDocumentGenerator.provider_env_keys(provider):
+        value = os.getenv(env_var)
+        if value:
+            return value
+    return ""
+
+
 DEFAULT_STORAGE = Path(os.getenv("JOBOFCRON_STORAGE", "jobofcron_data.json"))
 
 DEFAULT_CUSTOM_RESUME_TEMPLATE = """$contact_block
@@ -961,6 +987,19 @@ def _render_documents_tab() -> None:
     if selection != "Manual entry":
         selected = results[options.index(selection) - 1]
 
+
+    provider_choices = AIDocumentGenerator.available_providers() or ["openai"]
+    prompt_styles = AIDocumentGenerator.available_prompt_styles() or ["general"]
+    default_provider = _detect_default_ai_provider()
+    if default_provider not in provider_choices:
+        default_provider = provider_choices[0]
+    has_ai_env = any(
+        os.getenv(env_var)
+        for provider in provider_choices
+        for env_var in AIDocumentGenerator.provider_env_keys(provider)
+    )
+
+
     with st.form("documents_form"):
         title = st.text_input("Job title", value=selected.title if selected else "")
         company = st.text_input("Company", value="")
@@ -976,16 +1015,50 @@ def _render_documents_tab() -> None:
         tags_text = st.text_input("Tags", value="")
         use_ai = st.checkbox(
             "Use AI generator",
-            value=bool(os.getenv("OPENAI_API_KEY")),
-            help="Requires the openai package and an API key.",
+
+            value=has_ai_env,
+            help="Requires the ai optional dependencies and an API key for the selected provider.",
         )
-        ai_model = st.text_input("AI model", value="gpt-4o-mini", disabled=not use_ai)
-        ai_temperature = st.slider("AI creativity", min_value=0.0, max_value=1.0, value=0.3, step=0.05, disabled=not use_ai)
+        provider_index = provider_choices.index(default_provider)
+        ai_provider = st.selectbox(
+            "AI provider",
+            provider_choices,
+            index=provider_index,
+            disabled=not use_ai,
+        )
+        prompt_index = prompt_styles.index("general") if "general" in prompt_styles else 0
+        ai_style = st.selectbox(
+            "AI prompt focus",
+            prompt_styles,
+            index=prompt_index,
+            disabled=not use_ai,
+            help="Tailor output for technical, sales, customer success, leadership, and other role families.",
+        )
+        model_key = f"ai_model_{ai_provider}"
+        model_default = PROVIDER_DEFAULT_MODELS.get(ai_provider, "gpt-4o-mini")
+        ai_model = st.text_input(
+            "AI model",
+            value=st.session_state.get(model_key, model_default),
+            disabled=not use_ai,
+            key=model_key,
+            help=f"Suggested default: {model_default}",
+        )
+        ai_temperature = st.slider(
+            "AI creativity",
+            min_value=0.0,
+            max_value=1.0,
+            value=0.3,
+            step=0.05,
+            disabled=not use_ai,
+        )
+        key_key = f"ai_api_key_{ai_provider}"
         ai_key = st.text_input(
             "AI API key",
-            value=os.getenv("OPENAI_API_KEY", ""),
+            value=st.session_state.get(key_key, _env_value_for_provider(ai_provider)),
             type="password",
             disabled=not use_ai,
+            key=key_key,
+
         )
         output_dir = st.text_input("Output directory", value="generated_documents")
         enqueue = st.checkbox("Add to queue", value=False)
@@ -1075,7 +1148,16 @@ def _render_documents_tab() -> None:
     cover_text: str
     if use_ai:
         try:
-            generator = AIDocumentGenerator(api_key=ai_key or None, model=ai_model, temperature=ai_temperature)
+
+            model_name = (ai_model or "").strip() or PROVIDER_DEFAULT_MODELS.get(ai_provider, "gpt-4o-mini")
+            generator = AIDocumentGenerator(
+                api_key=ai_key or None,
+                model=model_name,
+                temperature=ai_temperature,
+                provider=ai_provider,
+                prompt_style=ai_style,
+            )
+
         except DocumentGenerationDependencyError as exc:
             st.error(str(exc))
             return
@@ -1128,7 +1210,11 @@ def _render_documents_tab() -> None:
             custom_cover_letter_template=cover_custom_text if cover_choice == "custom" else None,
         )
         if use_ai and generator:
-            queued.notes.append(f"Documents generated with AI model {generator.model}.")
+
+            queued.notes.append(
+                f"Documents generated with {ai_provider} ({generator.model}, style={ai_style})."
+            )
+
         queue.add(queued)
         st.success(f"Queued {queued.job_id} for {schedule_time.isoformat(timespec='minutes')}.")
 

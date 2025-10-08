@@ -7,7 +7,9 @@ Jobofcron is a roadmap for an automated job application assistant that tailors e
 - **Job discovery engine** – searches Google (via SerpAPI) *and* Craigslist for job + location queries, prioritising company career pages so we can apply directly, skip blacklisted employers, and warn about duplicate leads before they enter the queue.
 - **Direct email automation** – extracts Craigslist contact addresses, assembles application emails with attachments, and sends them via configurable SMTP credentials when form-based automation is not available.
 - **Evaluation & matching** – compares job descriptions with the stored talent/skills inventory to determine fit and to decide whether to request more info from the user.
-- **Resume & cover letter generator** – adapts resume sections and cover letters using the known profile plus any job-specific prompts from the user and saves reusable drafts for each opportunity. Multiple built-in styles (traditional, modern, minimal) and custom template builders let you tailor the tone for each application. When an OpenAI API key is configured, the generator can switch to AI-authored Markdown drafts.
+
+- **Resume & cover letter generator** – adapts resume sections and cover letters using the known profile plus any job-specific prompts from the user and saves reusable drafts for each opportunity. Multiple built-in styles (traditional, modern, minimal) and custom template builders let you tailor the tone for each application. With AI credentials in place you can switch between OpenAI, Anthropic, or Cohere powered Markdown drafts and pick specialised prompt styles (technical, sales, customer success, leadership, etc.) to shape the voice.
+
 - **Application scheduler & queue** – queues applications, spaces them out with configurable breaks, persists the backlog, and tracks submission history to avoid rate limits.
 - **Browser automation** – drives Playwright to fill in company career portals directly, supporting dry runs when you simply want to generate documents.
 - **Audit trail** – keeps a running ledger of applied jobs, outcomes, and newly discovered skills for future iterations.
@@ -32,9 +34,11 @@ Initial scaffolding for the automation toolkit now lives under ``src/jobofcron``
 - ``cli.py`` – a command line utility for updating preferences, adding skills, planning application pacing, generating tailored documents, queueing applications, and sourcing direct-apply leads from Google.
 - ``job_search.py`` – helpers for Google (SerpAPI) and Craigslist searches, including aggregator filtering for company-owned listings.
 - ``job_matching.py`` – heuristics that analyse job descriptions, surface questions for the candidate, and suggest resume updates.
-- ``document_generation.py`` – renders quick-turn resume and cover-letter drafts tailored to a posting and the stored profile, with optional AI-powered generation when an OpenAI key is available.
+
+- ``document_generation.py`` – renders quick-turn resume and cover-letter drafts tailored to a posting and the stored profile, with optional AI-powered generation spanning OpenAI, Anthropic, or Cohere plus role-specific prompt styles.
 - ``application_queue.py`` – manages the persisted queue of scheduled applications and their statuses.
-- ``application_automation.py`` – wraps Playwright for direct company-site submissions, including dedicated flows for Greenhouse and Lever.
+- ``application_automation.py`` – wraps Playwright for direct company-site submissions, including dedicated flows for Greenhouse, Lever, Workday, and iCIMS with stealth hardening for sensitive portals.
+
 - ``worker.py`` – background runner that refreshes documents and processes the queue over time.
 
 ### Running the CLI
@@ -48,8 +52,10 @@ python -m jobofcron.cli add-skill "Customer Success"
 python -m jobofcron.cli plan --titles "Success Manager" "Support Lead" --companies "Acme" "Globex"
 python -m jobofcron.cli analyze --title "Customer Success Manager" --company "Acme" --location "Remote" --salary '$70,000 - $90,000' --description-file posting.txt
 python -m jobofcron.cli generate-docs --title "Customer Success Manager" --company "Acme" --location "Remote" --salary '$70,000 - $90,000' --description-file posting.txt --output-dir generated_documents --enqueue --apply-at 2024-05-01T09:30 --apply-url https://careers.example.com/apply
-python -m jobofcron.cli generate-docs --title "Customer Success Manager" --company "Acme" --location "Remote" --salary '$70,000 - $90,000' --description-file posting.txt --use-ai --ai-model gpt-4o-mini --output-dir generated_documents
-python -m jobofcron.cli apply --queue-id "Customer Success Manager@Acme" --dry-run
+
+python -m jobofcron.cli generate-docs --title "Customer Success Manager" --company "Acme" --location "Remote" --salary '$70,000 - $90,000' --description-file posting.txt --use-ai --ai-provider anthropic --ai-model claude-3-sonnet-20240229 --ai-style technical --output-dir generated_documents
+python -m jobofcron.cli apply --queue-id "Customer Success Manager@Acme" --ai-docs --ai-provider cohere --ai-style customer_success --disable-stealth --dry-run
+
 python -m jobofcron.cli worker --loop --interval 600 --documents-dir generated_documents
 python -m jobofcron.cli search --title "Customer Success Manager" --location "Austin, TX" --limit 5 --direct-only --sample-response samples/serpapi_demo_response.json --verbose
 python -m jobofcron.cli search --title "Automation Technician" --location "Portland" --provider craigslist --limit 10
@@ -90,12 +96,19 @@ for bulk scheduling. The batch command accepts ``--resume-template`` and
 layouts, and it will also skip anything that is blacklisted, already queued, or
 recorded in your application history.
 
-To let Jobofcron draft documents with OpenAI, install the ``ai`` optional
-dependency (``pip install --editable .[ai]``) and set ``OPENAI_API_KEY``. Use
-``--use-ai``/``--ai-docs`` with the CLI or the Streamlit toggle in the Documents
-tab to switch between template-based drafts and AI-authored Markdown. Template
-choices are also available via ``--resume-template``/``--cover-template`` on the
-CLI ``generate-docs`` and ``apply`` commands, with optional ``--contact-email``
+
+To let Jobofcron draft documents with AI providers, install the ``ai`` optional
+dependency (``pip install --editable .[ai]``). This pulls in the OpenAI,
+Anthropic, and Cohere SDKs. Provide credentials via
+``OPENAI_API_KEY``/``JOBOFCRON_OPENAI_KEY``,
+``ANTHROPIC_API_KEY``/``JOBOFCRON_ANTHROPIC_KEY``, or
+``COHERE_API_KEY``/``JOBOFCRON_COHERE_KEY``. Use ``--ai-provider``,
+``--ai-style``, and ``--use-ai``/``--ai-docs`` with the CLI or the Streamlit
+toggle in the Documents tab to switch between template-based drafts and
+AI-authored Markdown that match specialised role prompts. Template choices are
+also available via ``--resume-template``/``--cover-template`` on the CLI
+``generate-docs`` and ``apply`` commands, with optional ``--contact-email``
+
 fields for email-first applications.
 
 ### Streamlit control centre
@@ -122,7 +135,10 @@ The app offers:
   duplicate matches are highlighted before you queue them.
 - **Job analysis** – paste descriptions, view visual match scores, capture
   follow-up questions, and queue promising postings for automation.
-- **Documents** – generate resumes and cover letters from templates or OpenAI,
+
+- **Documents** – generate resumes and cover letters from templates or AI
+  providers (OpenAI, Anthropic, Cohere), choose specialised prompt focuses,
+
   save them to disk, download previews, and queue applications in one step.
   Built-in styles plus custom template builders keep the tone consistent across
   applications.
@@ -141,6 +157,13 @@ pip install --editable .[automation]
 playwright install
 ```
 
+
+The automation helper now randomises user agents, applies stealth patches, and
+includes dedicated flows for Greenhouse, Lever, Workday, and iCIMS portals. Use
+``--disable-stealth`` with the CLI or worker if a site rejects the hardened
+profile and you need to fall back to the vanilla Playwright fingerprint.
+
+
 Use ``--dry-run`` with the ``apply`` and ``worker`` commands to generate
 documents without launching a browser session. Failed attempts are automatically
 rescheduled based on the configured retry delay.
@@ -151,8 +174,10 @@ environment (``JOBOFCRON_SMTP_HOST``, ``JOBOFCRON_SMTP_PORT``,
 or the corresponding CLI flags (``--email-host``/``--email-port``/etc.).
 
 ## Next Steps
-- Expand Playwright recipes for additional applicant tracking systems (Workday, iCIMS).
-- Add stealth/anti-bot browser hardening for sensitive portals.
-- Integrate additional AI providers and prompt templates for specialised roles.
+
+- Handle multi-step Workday and iCIMS flows that require assessments, staged uploads, or additional questionnaires.
+- Track which AI provider/model/prompt combinations lead to interviews so the worker can recommend the highest performing mix.
+- Capture stealth diagnostics (screenshots/video) on automation failures to simplify troubleshooting complex portals.
+
 
 These building blocks provide the "pieces" you can follow as we iterate toward the working product.

@@ -16,12 +16,19 @@ dependencies = [
 [project.optional-dependencies]
 automation = [
     "playwright>=1.44",
+
+    "playwright-stealth>=1.1.1",
+
 ]
 ui = [
     "streamlit>=1.32",
 ]
 ai = [
     "openai>=1.14",
+
+    "anthropic>=0.25",
+    "cohere>=5.3",
+
 ]
 
 [tool.setuptools.packages.find]
