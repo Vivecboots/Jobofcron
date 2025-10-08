@@ -4,7 +4,7 @@ from __future__ import annotations
 import os
 from datetime import datetime
 from string import Template
-from typing import Dict, Iterable, List, Optional
+from typing import Dict, Iterable, List, Optional, Sequence, Tuple
 
 from .job_matching import JobPosting, MatchAssessment
 from .profile import CandidateProfile, Experience
@@ -614,6 +614,28 @@ class AIDocumentGenerator:
             ]
         )
 
+    def _reference_materials_block(
+        self, reference_materials: Optional[Sequence[Tuple[str, str]]]
+    ) -> str:
+        if not reference_materials:
+            return ""
+
+        excerpts: List[str] = []
+        for idx, (name, content) in enumerate(reference_materials, start=1):
+            if idx > 4:
+                break
+            snippet = (content or "").strip()
+            if not snippet:
+                continue
+            label = name or f"Resume {idx}"
+            normalised = snippet.replace("\r\n", "\n")
+            excerpts.append(f"{label}:\n{normalised[:2000]}")
+
+        if not excerpts:
+            return ""
+
+        return "\n\nPrevious resume excerpts:\n" + "\n\n---\n".join(excerpts)
+
     def _chat(self, prompt: str) -> str:
 
         provider, client, mode = self._build_client()
@@ -673,6 +695,8 @@ class AIDocumentGenerator:
         profile: CandidateProfile,
         posting: JobPosting,
         assessment: MatchAssessment,
+        *,
+        reference_materials: Optional[Sequence[Tuple[str, str]]] = None,
     ) -> str:
 
         specialty = SPECIALTY_PROMPTS.get(self.prompt_style, SPECIALTY_PROMPTS["general"])  # type: ignore[index]
@@ -684,6 +708,9 @@ class AIDocumentGenerator:
             "Job posting details:\n"
             f"{self._posting_summary(posting, assessment)}"
         )
+        reference_block = self._reference_materials_block(reference_materials)
+        if reference_block:
+            prompt += reference_block
         content = self._chat(prompt)
         return content + ("\n" if not content.endswith("\n") else "")
 
@@ -692,6 +719,8 @@ class AIDocumentGenerator:
         profile: CandidateProfile,
         posting: JobPosting,
         assessment: MatchAssessment,
+        *,
+        reference_materials: Optional[Sequence[Tuple[str, str]]] = None,
     ) -> str:
 
         specialty = SPECIALTY_PROMPTS.get(self.prompt_style, SPECIALTY_PROMPTS["general"])  # type: ignore[index]
@@ -703,5 +732,8 @@ class AIDocumentGenerator:
             "Job posting details:\n"
             f"{self._posting_summary(posting, assessment)}"
         )
+        reference_block = self._reference_materials_block(reference_materials)
+        if reference_block:
+            prompt += reference_block
         content = self._chat(prompt)
         return content + ("\n" if not content.endswith("\n") else "")

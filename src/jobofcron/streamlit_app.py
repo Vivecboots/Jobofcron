@@ -12,9 +12,12 @@ import json
 import os
 import sys
 from datetime import datetime, timedelta
-from io import StringIO
+from io import BytesIO, StringIO
 from pathlib import Path
 from typing import Iterable, List, Optional
+from uuid import uuid4
+from xml.etree import ElementTree
+from zipfile import ZipFile
 
 import streamlit as st
 
@@ -123,6 +126,53 @@ def _slugify(*parts: str) -> str:
     return "".join(cleaned) or "document"
 
 
+def _extract_text_from_docx(data: bytes) -> str:
+    try:
+        with ZipFile(BytesIO(data)) as archive:
+            document_xml = archive.read("word/document.xml")
+    except KeyError as exc:
+        raise ValueError("The DOCX file is missing document.xml") from exc
+    except Exception as exc:  # pragma: no cover - defensive parsing
+        raise ValueError("Unable to read the DOCX file") from exc
+
+    try:
+        root = ElementTree.fromstring(document_xml)
+    except ElementTree.ParseError as exc:  # pragma: no cover - defensive parsing
+        raise ValueError("Unable to parse the DOCX contents") from exc
+
+    namespace = {"w": "http://schemas.openxmlformats.org/wordprocessingml/2006/main"}
+    paragraphs: List[str] = []
+    for paragraph in root.findall(".//w:p", namespace):
+        runs = [node.text or "" for node in paragraph.findall(".//w:t", namespace)]
+        if runs:
+            paragraphs.append("".join(runs))
+    return "\n".join(paragraphs).strip()
+
+
+def _read_uploaded_resume(upload) -> tuple[Optional[tuple[str, str]], Optional[str]]:
+    filename = getattr(upload, "name", "uploaded_resume")
+    suffix = Path(filename).suffix.lower()
+    data = upload.getvalue()
+
+    try:
+        if suffix in {".txt", ".md", ".markdown"}:
+            text = data.decode("utf-8", errors="ignore")
+        elif suffix == ".docx":
+            text = _extract_text_from_docx(data)
+        else:
+            return None, "Unsupported file type. Upload .txt, .md, or .docx resumes."
+    except UnicodeDecodeError:
+        return None, "Could not decode the file as UTF-8 text."
+    except ValueError as exc:
+        return None, str(exc)
+
+    text = text.strip()
+    if not text:
+        return None, "The uploaded file did not contain any readable text."
+
+    return (filename, text), None
+
+
 def _normalise_term(value: Optional[str]) -> str:
     if not value:
         return ""
@@ -183,6 +233,8 @@ def _initialise_session_state() -> None:
         st.session_state.resume_template_choice = "traditional"
     if "cover_template_choice" not in st.session_state:
         st.session_state.cover_template_choice = "traditional"
+    if "documents_reference_resumes" not in st.session_state:
+        st.session_state.documents_reference_resumes = []
 
 
 def _reload_state_if_needed(path_text: str) -> None:
@@ -987,6 +1039,80 @@ def _render_documents_tab() -> None:
     if selection != "Manual entry":
         selected = results[options.index(selection) - 1]
 
+    reference_state_key = "documents_reference_resumes"
+    reference_entries: List[dict] = st.session_state.get(reference_state_key, [])
+
+    st.markdown("### Reference resumes")
+    st.caption(
+        "Upload previous resumes so the AI generator can mine your achievements and phrasing for new drafts."
+    )
+    uploads = st.file_uploader(
+        "Add resume files",
+        type=["txt", "md", "markdown", "docx"],
+        accept_multiple_files=True,
+    )
+    if uploads:
+        for upload in uploads:
+            parsed, error = _read_uploaded_resume(upload)
+            if error:
+                st.warning(f"{upload.name}: {error}")
+                continue
+            if not parsed:
+                continue
+            name, text = parsed
+            existing = next((entry for entry in reference_entries if entry.get("name") == name), None)
+            if existing:
+                existing["content"] = text
+                existing["uploaded_at"] = datetime.now().isoformat(timespec="seconds")
+            else:
+                reference_entries.append(
+                    {
+                        "id": str(uuid4()),
+                        "name": name,
+                        "content": text,
+                        "uploaded_at": datetime.now().isoformat(timespec="seconds"),
+                    }
+                )
+        st.session_state[reference_state_key] = reference_entries
+
+    if reference_entries:
+        for entry in list(reference_entries):
+            label = entry.get("name", "Resume")
+            preview_length = len(entry.get("content", ""))
+            display_label = f"{label} ({preview_length} chars)"
+            with st.expander(display_label, expanded=False):
+                label_key = f"resume_label_{entry['id']}"
+                content_key = f"resume_content_{entry['id']}"
+                updated_label = st.text_input("Label", value=label, key=label_key).strip() or label
+                if updated_label != entry.get("name"):
+                    entry["name"] = updated_label
+                updated_content = st.text_area(
+                    "Editable text",
+                    value=entry.get("content", ""),
+                    height=220,
+                    key=content_key,
+                )
+                if updated_content != entry.get("content"):
+                    entry["content"] = updated_content
+                st.caption(f"Last added {entry.get('uploaded_at', 'recently')}")
+                if st.button("Remove", key=f"remove_resume_{entry['id']}"):
+                    st.session_state[reference_state_key] = [
+                        item for item in reference_entries if item["id"] != entry["id"]
+                    ]
+                    st.experimental_rerun()
+        st.session_state[reference_state_key] = reference_entries
+    else:
+        st.info("No reference resumes uploaded yet. Add .txt, .md, or .docx files above.")
+
+    reference_entries = st.session_state.get(reference_state_key, [])
+    reference_materials = [
+        (
+            entry.get("name") or f"Resume {idx + 1}",
+            entry.get("content", ""),
+        )
+        for idx, entry in enumerate(reference_entries)
+        if entry.get("content", "").strip()
+    ]
 
     provider_choices = AIDocumentGenerator.available_providers() or ["openai"]
     prompt_styles = AIDocumentGenerator.available_prompt_styles() or ["general"]
@@ -999,6 +1125,103 @@ def _render_documents_tab() -> None:
         for env_var in AIDocumentGenerator.provider_env_keys(provider)
     )
 
+
+    use_ai_state_key = "documents_use_ai_enabled"
+    use_ai_default = st.session_state.get(use_ai_state_key, has_ai_env)
+    use_ai = st.checkbox(
+        "Use AI generator",
+        value=use_ai_default,
+        key=use_ai_state_key,
+        help="Requires the ai optional dependencies and an API key for the selected provider.",
+    )
+    use_ai = st.session_state.get(use_ai_state_key, use_ai_default)
+
+    def _ensure_ai_model_session(provider: str) -> str:
+        key = f"ai_model_{provider}"
+        if key not in st.session_state:
+            st.session_state[key] = PROVIDER_DEFAULT_MODELS.get(provider, "gpt-4o-mini")
+        return key
+
+    def _ensure_ai_api_key_session(provider: str) -> str:
+        key = f"ai_api_key_{provider}"
+        if key not in st.session_state:
+            st.session_state[key] = _env_value_for_provider(provider)
+        return key
+
+    ai_provider_state_key = "documents_ai_provider"
+    if (
+        ai_provider_state_key not in st.session_state
+        or st.session_state[ai_provider_state_key] not in provider_choices
+    ):
+        st.session_state[ai_provider_state_key] = default_provider
+
+    prompt_style_state_key = "documents_ai_prompt_style"
+    default_prompt_style = "general" if "general" in prompt_styles else prompt_styles[0]
+    if (
+        prompt_style_state_key not in st.session_state
+        or st.session_state[prompt_style_state_key] not in prompt_styles
+    ):
+        st.session_state[prompt_style_state_key] = default_prompt_style
+
+    temperature_state_key = "documents_ai_temperature"
+    if temperature_state_key not in st.session_state:
+        st.session_state[temperature_state_key] = 0.3
+
+    if use_ai:
+        st.markdown("### AI configuration")
+        st.selectbox(
+            "AI provider",
+            provider_choices,
+            key=ai_provider_state_key,
+            help="Select the provider to use for automated document drafting.",
+        )
+        ai_provider = st.session_state[ai_provider_state_key]
+        model_key = _ensure_ai_model_session(ai_provider)
+        key_key = _ensure_ai_api_key_session(ai_provider)
+        st.selectbox(
+            "AI prompt focus",
+            prompt_styles,
+            key=prompt_style_state_key,
+            help="Tailor output for technical, sales, customer success, leadership, and other role families.",
+        )
+        model_default = PROVIDER_DEFAULT_MODELS.get(ai_provider, "gpt-4o-mini")
+        st.text_input(
+            "AI model",
+            key=model_key,
+            help=f"Suggested default: {model_default}",
+        )
+        st.slider(
+            "AI creativity",
+            min_value=0.0,
+            max_value=1.0,
+            step=0.05,
+            key=temperature_state_key,
+        )
+        st.text_input(
+            "AI API key",
+            type="password",
+            key=key_key,
+        )
+    else:
+        ai_provider = st.session_state[ai_provider_state_key]
+        model_key = _ensure_ai_model_session(ai_provider)
+        key_key = _ensure_ai_api_key_session(ai_provider)
+        st.caption(
+            "Enable the AI generator above to configure the provider, prompt focus, model, creativity, and API key.",
+        )
+
+    ai_provider = st.session_state[ai_provider_state_key]
+    model_key = _ensure_ai_model_session(ai_provider)
+    key_key = _ensure_ai_api_key_session(ai_provider)
+    ai_style = st.session_state[prompt_style_state_key]
+    ai_model = st.session_state[model_key]
+    ai_temperature = float(st.session_state[temperature_state_key])
+    ai_key = st.session_state[key_key]
+
+    if reference_materials and not use_ai:
+        st.caption(
+            "Reference resumes are stored for when you enable the AI generator above."
+        )
 
     with st.form("documents_form"):
         title = st.text_input("Job title", value=selected.title if selected else "")
@@ -1013,53 +1236,6 @@ def _render_documents_tab() -> None:
             height=220,
         )
         tags_text = st.text_input("Tags", value="")
-        use_ai = st.checkbox(
-            "Use AI generator",
-
-            value=has_ai_env,
-            help="Requires the ai optional dependencies and an API key for the selected provider.",
-        )
-        provider_index = provider_choices.index(default_provider)
-        ai_provider = st.selectbox(
-            "AI provider",
-            provider_choices,
-            index=provider_index,
-            disabled=not use_ai,
-        )
-        prompt_index = prompt_styles.index("general") if "general" in prompt_styles else 0
-        ai_style = st.selectbox(
-            "AI prompt focus",
-            prompt_styles,
-            index=prompt_index,
-            disabled=not use_ai,
-            help="Tailor output for technical, sales, customer success, leadership, and other role families.",
-        )
-        model_key = f"ai_model_{ai_provider}"
-        model_default = PROVIDER_DEFAULT_MODELS.get(ai_provider, "gpt-4o-mini")
-        ai_model = st.text_input(
-            "AI model",
-            value=st.session_state.get(model_key, model_default),
-            disabled=not use_ai,
-            key=model_key,
-            help=f"Suggested default: {model_default}",
-        )
-        ai_temperature = st.slider(
-            "AI creativity",
-            min_value=0.0,
-            max_value=1.0,
-            value=0.3,
-            step=0.05,
-            disabled=not use_ai,
-        )
-        key_key = f"ai_api_key_{ai_provider}"
-        ai_key = st.text_input(
-            "AI API key",
-            value=st.session_state.get(key_key, _env_value_for_provider(ai_provider)),
-            type="password",
-            disabled=not use_ai,
-            key=key_key,
-
-        )
         output_dir = st.text_input("Output directory", value="generated_documents")
         enqueue = st.checkbox("Add to queue", value=False)
         schedule_time = datetime.now()
@@ -1162,8 +1338,18 @@ def _render_documents_tab() -> None:
             st.error(str(exc))
             return
         try:
-            resume_text = generator.generate_resume(profile, posting, assessment)
-            cover_text = generator.generate_cover_letter(profile, posting, assessment)
+            resume_text = generator.generate_resume(
+                profile,
+                posting,
+                assessment,
+                reference_materials=reference_materials,
+            )
+            cover_text = generator.generate_cover_letter(
+                profile,
+                posting,
+                assessment,
+                reference_materials=reference_materials,
+            )
         except DocumentGenerationError as exc:
             st.error(str(exc))
             return
