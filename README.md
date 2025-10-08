@@ -68,6 +68,29 @@ saved response via ``--sample-response`` for offline experimentation. Results ar
 tagged as ``DIRECT`` when the detected domain is not a known aggregator, helping
 you focus on company-owned application flows.
 
+### Streamlit control centre
+
+Prefer a point-and-click experience? Install the optional UI extras and launch
+the Streamlit dashboard:
+
+```bash
+pip install --editable .[ui]
+streamlit run src/jobofcron/streamlit_app.py
+```
+
+The app offers:
+
+- **Profile editor** – update contact details, salary expectations, and location
+  preferences without touching JSON files.
+- **Job search** – run SerpAPI-backed Google searches (or upload saved JSON
+  responses) and focus on company-owned application flows.
+- **Job analysis** – paste descriptions, view visual match scores, capture
+  follow-up questions, and queue promising postings for automation.
+- **Skills dashboard** – review in-demand skills, add notes, and log interviews
+  or offers to guide future tailoring.
+- **Application queue planner** – inspect pending submissions, reschedule,
+  record successes, and export search results to CSV for offline sharing.
+
 ### Automation Extras
 
 To drive direct applications you will need the optional automation dependencies:

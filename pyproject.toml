@@ -17,6 +17,9 @@ dependencies = [
 automation = [
     "playwright>=1.44",
 ]
+ui = [
+    "streamlit>=1.32",
+]
 
 [tool.setuptools.packages.find]
 where = ["src"]
