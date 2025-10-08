@@ -4,7 +4,7 @@ Jobofcron is a roadmap for an automated job application assistant that tailors e
 
 ## System Overview
 - **User profile manager** – stores personal information, work history, skills, certifications, felony-friendly notes, and preferred industries. This evolves over time by asking the user for missing details.
-- **Job discovery engine** – searches Google (via SerpAPI) *and* Craigslist for job + location queries, prioritising company career pages so we can apply directly and avoid aggregator anti-bot hurdles.
+- **Job discovery engine** – searches Google (via SerpAPI) *and* Craigslist for job + location queries, prioritising company career pages so we can apply directly, skip blacklisted employers, and warn about duplicate leads before they enter the queue.
 - **Direct email automation** – extracts Craigslist contact addresses, assembles application emails with attachments, and sends them via configurable SMTP credentials when form-based automation is not available.
 - **Evaluation & matching** – compares job descriptions with the stored talent/skills inventory to determine fit and to decide whether to request more info from the user.
 - **Resume & cover letter generator** – adapts resume sections and cover letters using the known profile plus any job-specific prompts from the user and saves reusable drafts for each opportunity. Multiple built-in styles (traditional, modern, minimal) and custom template builders let you tailor the tone for each application. When an OpenAI API key is configured, the generator can switch to AI-authored Markdown drafts.
@@ -27,7 +27,8 @@ Initial scaffolding for the automation toolkit now lives under ``src/jobofcron``
 - ``profile.py`` – data models for the evolving user profile and job preferences.
 - ``skills_inventory.py`` – tracks skills encountered in job descriptions and the resulting outcomes.
 - ``scheduler.py`` – spaces applications over time with configurable breaks.
-- ``storage.py`` – persists profiles, skill snapshots, and the queued application backlog to JSON for iterative learning.
+- ``storage.py`` – persists profiles, skill snapshots, queued applications, and the duplicate-prevention history to JSON for iterative learning.
+- ``job_history.py`` – records where and when you already applied so searches and queueing skip duplicates automatically.
 - ``cli.py`` – a command line utility for updating preferences, adding skills, planning application pacing, generating tailored documents, queueing applications, and sourcing direct-apply leads from Google.
 - ``job_search.py`` – helpers for Google (SerpAPI) and Craigslist searches, including aggregator filtering for company-owned listings.
 - ``job_matching.py`` – heuristics that analyse job descriptions, surface questions for the candidate, and suggest resume updates.
@@ -42,6 +43,7 @@ Initial scaffolding for the automation toolkit now lives under ``src/jobofcron``
 pip install --editable .
 python -m jobofcron.cli show
 python -m jobofcron.cli prefs --min-salary 85000 --locations "Remote" "Austin, TX"
+python -m jobofcron.cli prefs --blacklist "Contoso" "Evil Corp"
 python -m jobofcron.cli add-skill "Customer Success"
 python -m jobofcron.cli plan --titles "Success Manager" "Support Lead" --companies "Acme" "Globex"
 python -m jobofcron.cli analyze --title "Customer Success Manager" --company "Acme" --location "Remote" --salary '$70,000 - $90,000' --description-file posting.txt
@@ -52,6 +54,7 @@ python -m jobofcron.cli worker --loop --interval 600 --documents-dir generated_d
 python -m jobofcron.cli search --title "Customer Success Manager" --location "Austin, TX" --limit 5 --direct-only --sample-response samples/serpapi_demo_response.json --verbose
 python -m jobofcron.cli search --title "Automation Technician" --location "Portland" --provider craigslist --limit 10
 python -m jobofcron.cli search --title "Field Service" --location "Denver" --min-match-score 70 --output denver_field_service.json
+python -m jobofcron.cli search --title "Field Service" --location "Denver" --sort-by company --min-match-score 70
 python -m jobofcron.cli batch-queue --results denver_field_service.json --start 2024-05-02T09:00 --interval-minutes 30 --resume-template modern --cover-template modern
 python -m jobofcron.cli record-outcome --queue-id "Customer Success Manager@Acme" --outcome interview --note "Intro call completed" --skills "Customer Success" "SaaS onboarding"
 ```
@@ -74,14 +77,18 @@ response via ``--sample-response`` for offline experimentation. Craigslist
 searches accept a site slug (e.g. ``--craigslist-site austin``) and do not
 require an API key. Google results are tagged as ``DIRECT`` when the detected
 domain is not a known aggregator, helping you focus on company-owned application
-flows.
+flows. Results from companies on your blacklist are skipped automatically, and
+any posting that matches something already queued or previously applied is
+flagged so you can avoid duplicate submissions.
 
-Add ``--min-match-score`` to automatically suppress low-fit postings and
-``--output`` to write a JSON payload that can be fed into ``batch-queue`` for
-bulk scheduling. The batch command accepts ``--resume-template`` and
+Add ``--min-match-score`` to automatically suppress low-fit postings, use
+``--sort-by`` (``match``, ``date``, ``company``) to reorder the remaining hits,
+and ``--output`` to write a JSON payload that can be fed into ``batch-queue``
+for bulk scheduling. The batch command accepts ``--resume-template`` and
 ``--cover-template`` (``traditional``, ``modern``, ``minimal``, ``custom``) plus
 ``--resume-template-file``/``--cover-template-file`` for custom Markdown
-layouts.
+layouts, and it will also skip anything that is blacklisted, already queued, or
+recorded in your application history.
 
 To let Jobofcron draft documents with OpenAI, install the ``ai`` optional
 dependency (``pip install --editable .[ai]``) and set ``OPENAI_API_KEY``. Use
@@ -109,9 +116,10 @@ The app offers:
   recorded outcomes, and the next scheduled submissions.
 - **Job search** – run SerpAPI-backed Google searches (or upload saved JSON
   responses) and Craigslist scrapes, focusing on company-owned application flows.
-  Filter results by match score, preview descriptions inline, capture Craigslist
-  contact emails, export CSV/JSON payloads, and batch-queue multiple postings in
-  one click.
+  Filter results by match score, sort by recency or company, preview descriptions
+  inline, capture Craigslist contact emails, export CSV/JSON payloads, and batch
+  queue multiple postings in one click. Blacklisted employers are hidden and
+  duplicate matches are highlighted before you queue them.
 - **Job analysis** – paste descriptions, view visual match scores, capture
   follow-up questions, and queue promising postings for automation.
 - **Documents** – generate resumes and cover letters from templates or OpenAI,

@@ -18,6 +18,7 @@ from .document_generation import (
     generate_cover_letter,
     generate_resume,
 )
+from .job_history import AppliedJobRegistry
 from .job_matching import JobPosting, analyse_job_fit
 from .job_search import CraigslistSearch, GoogleJobSearch
 from .profile import CandidateProfile
@@ -35,6 +36,23 @@ def slugify(*parts: str) -> str:
     return "".join(cleaned) or "application"
 
 
+def _normalise_term(value: Optional[str]) -> str:
+    if not value:
+        return ""
+    return " ".join(value.strip().lower().split())
+
+
+def _matches_blacklist(value: Optional[str], blacklist: List[str]) -> bool:
+    target = _normalise_term(value)
+    if not target:
+        return False
+    for entry in blacklist:
+        token = _normalise_term(entry)
+        if token and token in target:
+            return True
+    return False
+
+
 def parse_iso_datetime(value: str) -> datetime:
     try:
         return datetime.fromisoformat(value)
@@ -44,9 +62,9 @@ def parse_iso_datetime(value: str) -> datetime:
 
 def load_or_init(
     storage_path: Path,
-) -> tuple[CandidateProfile, SkillsInventory, ApplicationQueue, Storage]:
+) -> tuple[CandidateProfile, SkillsInventory, ApplicationQueue, AppliedJobRegistry, Storage]:
     storage = Storage(storage_path)
-    profile, inventory, queue = storage.load()
+    profile, inventory, queue, history = storage.load()
 
     if profile is None:
         profile = CandidateProfile(name="Unknown", email="unknown@example.com")
@@ -54,16 +72,19 @@ def load_or_init(
         inventory = SkillsInventory()
     if queue is None:
         queue = ApplicationQueue()
-    return profile, inventory, queue, storage
+    if history is None:
+        history = AppliedJobRegistry()
+    return profile, inventory, queue, history, storage
 
 
 def save_and_exit(
     profile: CandidateProfile,
     inventory: SkillsInventory,
     queue: ApplicationQueue,
+    history: AppliedJobRegistry,
     storage: Storage,
 ) -> None:
-    storage.save(profile, inventory, queue)
+    storage.save(profile, inventory, queue, history)
 
 
 def build_email_sender_from_args(args: argparse.Namespace) -> Optional[EmailApplicationSender]:
@@ -103,7 +124,7 @@ def _build_ai_generator(
 
 
 def cmd_show_profile(args: argparse.Namespace) -> None:
-    profile, inventory, queue, _ = load_or_init(Path(args.storage))
+    profile, inventory, queue, history, _ = load_or_init(Path(args.storage))
     print("Profile:")
     print(f"  Name: {profile.name}")
     print(f"  Email: {profile.email}")
@@ -120,6 +141,10 @@ def cmd_show_profile(args: argparse.Namespace) -> None:
     print(f"    Locations: {', '.join(prefs.locations) if prefs.locations else 'None set'}")
     print(f"    Domains: {', '.join(prefs.focus_domains) if prefs.focus_domains else 'None set'}")
     print(f"    Felon friendly only: {'Yes' if prefs.felon_friendly_only else 'No'}")
+    print(
+        "    Blacklist: "
+        + (", ".join(prefs.blacklisted_companies) if prefs.blacklisted_companies else "None set")
+    )
 
     print("\nTracked skills (demand vs. success):")
     for record in inventory.sorted_by_opportunity():
@@ -139,12 +164,13 @@ def cmd_show_profile(args: argparse.Namespace) -> None:
 
 
 def cmd_update_preferences(args: argparse.Namespace) -> None:
-    profile, inventory, queue, storage = load_or_init(Path(args.storage))
+    profile, inventory, queue, history, storage = load_or_init(Path(args.storage))
     profile.job_preferences.update(
         min_salary=args.min_salary,
         locations=args.locations,
         focus_domains=args.domains,
         felon_friendly_only=args.felon_friendly,
+        blacklisted_companies=args.blacklist,
     )
     if args.name:
         profile.name = args.name
@@ -152,20 +178,20 @@ def cmd_update_preferences(args: argparse.Namespace) -> None:
         profile.email = args.email
     if args.phone:
         profile.phone = args.phone
-    save_and_exit(profile, inventory, queue, storage)
+    save_and_exit(profile, inventory, queue, history, storage)
     print("Preferences updated.")
 
 
 def cmd_add_skill(args: argparse.Namespace) -> None:
-    profile, inventory, queue, storage = load_or_init(Path(args.storage))
+    profile, inventory, queue, history, storage = load_or_init(Path(args.storage))
     profile.add_skill(args.skill)
     inventory.observe_skills([args.skill])
-    save_and_exit(profile, inventory, queue, storage)
+    save_and_exit(profile, inventory, queue, history, storage)
     print(f"Skill '{args.skill}' added.")
 
 
 def cmd_plan(args: argparse.Namespace) -> None:
-    profile, inventory, queue, _ = load_or_init(Path(args.storage))
+    profile, inventory, queue, _, _ = load_or_init(Path(args.storage))
     if len(args.titles) != len(args.companies):
         raise SystemExit("--titles and --companies must have the same length")
     jobs = [
@@ -184,7 +210,7 @@ def cmd_plan(args: argparse.Namespace) -> None:
 
 
 def cmd_analyze(args: argparse.Namespace) -> None:
-    profile, inventory, queue, storage = load_or_init(Path(args.storage))
+    profile, inventory, queue, history, storage = load_or_init(Path(args.storage))
 
     if args.description is None and args.description_file is None:
         raise SystemExit("Provide either --description or --description-file")
@@ -205,7 +231,7 @@ def cmd_analyze(args: argparse.Namespace) -> None:
 
     assessment = analyse_job_fit(profile, posting)
     inventory.observe_skills(assessment.required_skills)
-    save_and_exit(profile, inventory, queue, storage)
+    save_and_exit(profile, inventory, queue, history, storage)
 
     total_skills = len(assessment.required_skills)
     matched = len(assessment.matched_skills)
@@ -253,7 +279,7 @@ def cmd_analyze(args: argparse.Namespace) -> None:
 
 
 def cmd_generate_documents(args: argparse.Namespace) -> None:
-    profile, inventory, queue, storage = load_or_init(Path(args.storage))
+    profile, inventory, queue, history, storage = load_or_init(Path(args.storage))
 
     if args.description is None and args.description_file is None:
         raise SystemExit("Provide either --description or --description-file")
@@ -337,6 +363,16 @@ def cmd_generate_documents(args: argparse.Namespace) -> None:
         if not posting.apply_url:
             raise SystemExit("--apply-url is required when enqueueing an application")
         apply_at = parse_iso_datetime(args.apply_at) if args.apply_at else datetime.now()
+        blacklist = profile.job_preferences.blacklisted_companies
+        if blacklist and (
+            _matches_blacklist(posting.company, blacklist)
+            or _matches_blacklist(args.company, blacklist)
+        ):
+            print(
+                f"Skipping queue: {posting.company} is currently blacklisted in your preferences."
+            )
+            save_and_exit(profile, inventory, queue, history, storage)
+            return
         task = QueuedApplication(
             posting=posting,
             apply_at=apply_at,
@@ -349,10 +385,23 @@ def cmd_generate_documents(args: argparse.Namespace) -> None:
         )
         if args.use_ai:
             task.notes.append(f"Documents generated with AI model {args.ai_model}.")
-        queue.add(task)
-        print(f"Queued application {task.job_id} for {apply_at.isoformat(timespec='minutes')}")
+        existing = queue.find_matching(task.posting)
+        history_record = history.find(task.posting)
+        if existing:
+            print(
+                f"Skipping queue for {task.posting.title} at {task.posting.company}: already queued for"
+                f" {existing.apply_at.isoformat(timespec='minutes')} (status: {existing.status})."
+            )
+        elif history_record:
+            print(
+                f"Skipping queue for {task.posting.title} at {task.posting.company}: applied previously on"
+                f" {history_record.last_seen_at.isoformat(timespec='minutes')} (status: {history_record.last_status or 'unknown'})."
+            )
+        else:
+            queue.add(task)
+            print(f"Queued application {task.job_id} for {apply_at.isoformat(timespec='minutes')}")
 
-    save_and_exit(profile, inventory, queue, storage)
+    save_and_exit(profile, inventory, queue, history, storage)
 
 
 def _load_description(args: argparse.Namespace) -> str:
@@ -362,7 +411,7 @@ def _load_description(args: argparse.Namespace) -> str:
 
 
 def cmd_apply(args: argparse.Namespace) -> None:
-    profile, inventory, queue, storage = load_or_init(Path(args.storage))
+    profile, inventory, queue, history, storage = load_or_init(Path(args.storage))
     automation = DirectApplyAutomation(headless=not args.no_headless, timeout=args.timeout)
     task: Optional[QueuedApplication] = None
     now = datetime.now()
@@ -451,6 +500,30 @@ def cmd_apply(args: argparse.Namespace) -> None:
             print(f"Generated resume at {resume_path}")
             print(f"Generated cover letter at {cover_path}")
 
+    blacklist = profile.job_preferences.blacklisted_companies
+    if blacklist and (
+        _matches_blacklist(posting.company, blacklist)
+        or _matches_blacklist(posting.title, blacklist)
+    ):
+        print(
+            f"Warning: {posting.company} appears in your blacklist preferences."
+            " Remove it via 'prefs --blacklist' to stop seeing this warning."
+        )
+
+    existing = queue.find_matching(posting)
+    if existing and (task is None or existing.job_id != task.job_id):
+        print(
+            f"Warning: {posting.title} at {posting.company} is already queued for"
+            f" {existing.apply_at.isoformat(timespec='minutes')} (status: {existing.status})."
+        )
+    history_record = history.find(posting)
+    if history_record:
+        print(
+            "Warning: this job was previously actioned on "
+            f"{history_record.last_seen_at.isoformat(timespec='minutes')}"
+            f" (status: {history_record.last_status or 'unknown'})."
+        )
+
     email_handled = False
     email_target = bool(
         posting.contact_email or (posting.apply_url and posting.apply_url.startswith("mailto:"))
@@ -481,6 +554,7 @@ def cmd_apply(args: argparse.Namespace) -> None:
                 print("Application email sent successfully.")
                 if task:
                     task.mark_success()
+                history.record(posting, status="applied")
                 email_handled = True
     elif email_target and email_sender is None:
         print("Email contact detected but SMTP settings are missing; cannot send email automation.")
@@ -493,14 +567,14 @@ def cmd_apply(args: argparse.Namespace) -> None:
             email_handled = True
 
     if email_handled:
-        save_and_exit(profile, inventory, queue, storage)
+        save_and_exit(profile, inventory, queue, history, storage)
         return
 
     if posting.apply_url and posting.apply_url.startswith("mailto:"):
         print("Mailto apply link requires SMTP settings; aborting automation run.")
         if task:
             task.defer(now + timedelta(minutes=args.retry_minutes))
-        save_and_exit(profile, inventory, queue, storage)
+        save_and_exit(profile, inventory, queue, history, storage)
         return
 
     try:
@@ -522,6 +596,8 @@ def cmd_apply(args: argparse.Namespace) -> None:
                 print("Application submission routine completed.")
                 if task:
                     task.mark_success()
+                if not args.dry_run:
+                    history.record(posting, status=task.status if task else "applied")
         else:
             print("Submission sequence executed but no submit control was triggered.")
             if task:
@@ -538,17 +614,18 @@ def cmd_apply(args: argparse.Namespace) -> None:
             task.mark_failure(str(exc))
             task.defer(now + timedelta(minutes=args.retry_minutes))
     finally:
-        save_and_exit(profile, inventory, queue, storage)
+        save_and_exit(profile, inventory, queue, history, storage)
 
 
 def cmd_record_outcome(args: argparse.Namespace) -> None:
-    profile, inventory, queue, storage = load_or_init(Path(args.storage))
+    profile, inventory, queue, history, storage = load_or_init(Path(args.storage))
     job_id = args.queue_id
     task = queue.get(job_id)
     if not task:
         raise SystemExit(f"No queued application found with id {job_id}")
 
     task.record_outcome(args.outcome, note=args.note)
+    history.record(task.posting, status=task.status)
 
     target_skills: List[str] = args.skills or list(task.posting.tags or [])
     if args.outcome.lower() == "interview":
@@ -558,7 +635,7 @@ def cmd_record_outcome(args: argparse.Namespace) -> None:
         for skill in target_skills:
             inventory.record_offer(skill)
 
-    save_and_exit(profile, inventory, queue, storage)
+    save_and_exit(profile, inventory, queue, history, storage)
     print(f"Recorded outcome '{args.outcome}' for {job_id}.")
 
 
@@ -590,7 +667,7 @@ def cmd_worker(args: argparse.Namespace) -> None:
 
 
 def cmd_search(args: argparse.Namespace) -> None:
-    profile, _, _, _ = load_or_init(Path(args.storage))
+    profile, inventory, queue, history, _ = load_or_init(Path(args.storage))
 
     location = args.location
     if not location:
@@ -640,6 +717,8 @@ def cmd_search(args: argparse.Namespace) -> None:
         )
 
     scored_results = []
+    blacklist = [entry for entry in profile.job_preferences.blacklisted_companies if entry.strip()]
+    skipped_blacklisted: List[str] = []
     min_score_fraction = (args.min_match_score or 0) / 100
     for result in results:
         description = result.description or result.snippet
@@ -650,12 +729,49 @@ def cmd_search(args: argparse.Namespace) -> None:
             apply_url=result.link,
             contact_email=result.contact_email,
         )
+        if blacklist and (
+            _matches_blacklist(posting.company, blacklist)
+            or _matches_blacklist(result.source, blacklist)
+            or _matches_blacklist(result.title, blacklist)
+        ):
+            skipped_blacklisted.append(posting.company or result.source or result.title)
+            continue
         assessment = analyse_job_fit(profile, posting)
         result.match_score = assessment.match_score
+        duplicate_note = None
+        queue_match = queue.find_matching(posting)
+        history_match = history.find(posting)
+        if queue_match:
+            result.is_duplicate = True
+            duplicate_note = (
+                f"Queued for {queue_match.apply_at.isoformat(timespec='minutes')} (status: {queue_match.status})"
+            )
+        elif history_match:
+            result.is_duplicate = True
+            duplicate_note = (
+                "Applied "
+                f"{history_match.last_seen_at.isoformat(timespec='minutes')}"
+                f" (status: {history_match.last_status or 'unknown'})"
+            )
+        result.duplicate_reason = duplicate_note
         if assessment.match_score >= min_score_fraction:
             scored_results.append(result)
 
     results = scored_results
+
+    if args.sort_by == "match":
+        results.sort(key=lambda res: res.match_score or 0.0, reverse=True)
+    elif args.sort_by == "company":
+        results.sort(key=lambda res: (res.source or "").lower())
+    elif args.sort_by == "date":
+        results.sort(key=lambda res: res.published_at or datetime.min, reverse=True)
+
+    if skipped_blacklisted:
+        skipped_preview = ", ".join(sorted({name or "Unknown" for name in skipped_blacklisted})[:5])
+        print(
+            f"Filtered {len(skipped_blacklisted)} result(s) due to blacklist settings: {skipped_preview}"
+            + ("..." if len(set(skipped_blacklisted)) > 5 else "")
+        )
 
     if not results:
         print("No search results found.")
@@ -672,6 +788,8 @@ def cmd_search(args: argparse.Namespace) -> None:
         print(f"    Link:   {result.link}")
         if result.match_score is not None:
             print(f"    Match:  {int(round(result.match_score * 100))}%")
+        if result.is_duplicate and result.duplicate_reason:
+            print(f"    Duplicate: {result.duplicate_reason}")
         if result.contact_email:
             print(f"    Email:  {result.contact_email}")
         if args.verbose and result.snippet:
@@ -686,13 +804,15 @@ def cmd_search(args: argparse.Namespace) -> None:
                 data["match_score_percent"] = round(result.match_score * 100, 2)
             data["provider"] = args.provider
             data["searched_location"] = location
+            data["is_duplicate"] = result.is_duplicate
+            data["duplicate_reason"] = result.duplicate_reason
             payload.append(data)
         Path(args.output).write_text(json.dumps(payload, indent=2), encoding="utf-8")
         print(f"Saved filtered results to {args.output}")
 
 
 def cmd_batch_queue(args: argparse.Namespace) -> None:
-    profile, inventory, queue, storage = load_or_init(Path(args.storage))
+    profile, inventory, queue, history, storage = load_or_init(Path(args.storage))
 
     payload = json.loads(Path(args.results).read_text(encoding="utf-8"))
     if not isinstance(payload, list):
@@ -752,6 +872,30 @@ def cmd_batch_queue(args: argparse.Namespace) -> None:
         if not posting.apply_url and not posting.contact_email:
             continue
 
+        blacklist = profile.job_preferences.blacklisted_companies
+        if blacklist and (
+            _matches_blacklist(posting.company, blacklist)
+            or _matches_blacklist(item.get("source"), blacklist)
+            or _matches_blacklist(posting.title, blacklist)
+        ):
+            print(
+                f"Skipping {posting.title} at {posting.company}: company matches blacklist settings."
+            )
+            continue
+
+        if queue.find_matching(posting):
+            print(
+                f"Skipping {posting.title} at {posting.company}: already queued."
+            )
+            continue
+        history_record = history.find(posting)
+        if history_record:
+            print(
+                f"Skipping {posting.title} at {posting.company}: previously applied on"
+                f" {history_record.last_seen_at.isoformat(timespec='minutes')} (status: {history_record.last_status or 'unknown'})."
+            )
+            continue
+
         task = QueuedApplication(
             posting=posting,
             apply_at=apply_at,
@@ -764,7 +908,7 @@ def cmd_batch_queue(args: argparse.Namespace) -> None:
         queued += 1
         apply_at += interval
 
-    save_and_exit(profile, inventory, queue, storage)
+    save_and_exit(profile, inventory, queue, history, storage)
 
     if queued:
         print(
@@ -793,6 +937,7 @@ def build_parser() -> argparse.ArgumentParser:
     prefs.add_argument("--domains", nargs="*", default=None)
     prefs.add_argument("--felon-friendly", dest="felon_friendly", action="store_true")
     prefs.add_argument("--no-felon-friendly", dest="felon_friendly", action="store_false")
+    prefs.add_argument("--blacklist", nargs="*", default=None, help="Companies to avoid during search and queueing")
     prefs.set_defaults(felon_friendly=None)
     prefs.set_defaults(func=cmd_update_preferences)
 
@@ -938,6 +1083,12 @@ def build_parser() -> argparse.ArgumentParser:
     )
     search.add_argument("--verbose", action="store_true", help="Print search result snippets")
     search.add_argument("--min-match-score", type=int, default=0, help="Only show results scoring at or above this percent")
+    search.add_argument(
+        "--sort-by",
+        choices=["match", "date", "company"],
+        default="match",
+        help="Sort results by match score, published date, or company",
+    )
     search.add_argument("--output", help="Write the filtered results to a JSON file for later processing")
     search.set_defaults(func=cmd_search)
 

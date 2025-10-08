@@ -11,6 +11,7 @@ from .document_generation import (
     generate_cover_letter,
     generate_resume,
 )
+from .job_history import AppliedJobRegistry
 from .job_matching import JobPosting, MatchAssessment, analyse_job_fit, extract_required_skills
 from .job_search import CraigslistSearch, GoogleJobSearch, SearchResult
 from .profile import CandidateProfile, Experience, JobPreference
@@ -27,6 +28,7 @@ __all__ = [
     "GoogleJobSearch",
     "CraigslistSearch",
     "SearchResult",
+    "AppliedJobRegistry",
     "CandidateProfile",
     "Experience",
     "JobPreference",

@@ -32,6 +32,7 @@ if __package__ in {None, ""}:
         generate_cover_letter,
         generate_resume,
     )
+    from jobofcron.job_history import AppliedJobRegistry  # type: ignore[attr-defined]
     from jobofcron.job_matching import JobPosting, analyse_job_fit  # type: ignore[attr-defined]
     from jobofcron.job_search import CraigslistSearch, GoogleJobSearch, SearchResult  # type: ignore[attr-defined]
     from jobofcron.profile import CandidateProfile  # type: ignore[attr-defined]
@@ -48,6 +49,7 @@ else:
         generate_cover_letter,
         generate_resume,
     )
+    from .job_history import AppliedJobRegistry
     from .job_matching import JobPosting, analyse_job_fit
     from .job_search import CraigslistSearch, GoogleJobSearch, SearchResult
     from .profile import CandidateProfile
@@ -95,9 +97,28 @@ def _slugify(*parts: str) -> str:
     return "".join(cleaned) or "document"
 
 
-def _load_state(path: Path) -> tuple[CandidateProfile, SkillsInventory, ApplicationQueue, Storage]:
+def _normalise_term(value: Optional[str]) -> str:
+    if not value:
+        return ""
+    return " ".join(value.strip().lower().split())
+
+
+def _matches_blacklist(value: Optional[str], blacklist: Iterable[str]) -> bool:
+    target = _normalise_term(value)
+    if not target:
+        return False
+    for entry in blacklist:
+        token = _normalise_term(entry)
+        if token and token in target:
+            return True
+    return False
+
+
+def _load_state(
+    path: Path,
+) -> tuple[CandidateProfile, SkillsInventory, ApplicationQueue, AppliedJobRegistry, Storage]:
     storage = Storage(path)
-    profile, inventory, queue = storage.load()
+    profile, inventory, queue, history = storage.load()
 
     if profile is None:
         profile = CandidateProfile(name="Unknown", email="unknown@example.com")
@@ -105,18 +126,21 @@ def _load_state(path: Path) -> tuple[CandidateProfile, SkillsInventory, Applicat
         inventory = SkillsInventory()
     if queue is None:
         queue = ApplicationQueue()
+    if history is None:
+        history = AppliedJobRegistry()
 
-    return profile, inventory, queue, storage
+    return profile, inventory, queue, history, storage
 
 
 def _initialise_session_state() -> None:
     if "storage_path" not in st.session_state:
         st.session_state.storage_path = str(DEFAULT_STORAGE)
     if "loaded_storage_path" not in st.session_state:
-        profile, inventory, queue, storage = _load_state(Path(st.session_state.storage_path))
+        profile, inventory, queue, history, storage = _load_state(Path(st.session_state.storage_path))
         st.session_state.profile = profile
         st.session_state.inventory = inventory
         st.session_state.queue = queue
+        st.session_state.history = history
         st.session_state.storage = storage
         st.session_state.loaded_storage_path = st.session_state.storage_path
     if "search_results" not in st.session_state:
@@ -137,23 +161,42 @@ def _initialise_session_state() -> None:
 
 def _reload_state_if_needed(path_text: str) -> None:
     if path_text != st.session_state.get("loaded_storage_path"):
-        profile, inventory, queue, storage = _load_state(Path(path_text))
+        profile, inventory, queue, history, storage = _load_state(Path(path_text))
         st.session_state.profile = profile
         st.session_state.inventory = inventory
         st.session_state.queue = queue
+        st.session_state.history = history
         st.session_state.storage = storage
         st.session_state.loaded_storage_path = path_text
 
 
 def _save_state() -> None:
     storage: Storage = st.session_state.storage
-    storage.save(st.session_state.profile, st.session_state.inventory, st.session_state.queue)
+    storage.save(
+        st.session_state.profile,
+        st.session_state.inventory,
+        st.session_state.queue,
+        st.session_state.history,
+    )
 
 
 def _export_results_to_csv(results: Iterable[SearchResult]) -> bytes:
     buffer = StringIO()
     writer = csv.writer(buffer)
-    writer.writerow(["title", "link", "snippet", "source", "is_company_site", "match_score", "contact_email"])
+    writer.writerow(
+        [
+            "title",
+            "link",
+            "snippet",
+            "source",
+            "is_company_site",
+            "match_score",
+            "contact_email",
+            "published_at",
+            "is_duplicate",
+            "duplicate_reason",
+        ]
+    )
     for result in results:
         score = f"{result.match_score * 100:.0f}%" if result.match_score is not None else ""
         writer.writerow(
@@ -165,12 +208,23 @@ def _export_results_to_csv(results: Iterable[SearchResult]) -> bytes:
                 "yes" if result.is_company_site else "no",
                 score,
                 result.contact_email or "",
+                result.published_at.isoformat() if result.published_at else "",
+                "yes" if result.is_duplicate else "no",
+                result.duplicate_reason or "",
             ]
         )
     return buffer.getvalue().encode("utf-8")
 
 
-def _score_search_results(profile: CandidateProfile, results: List[SearchResult]) -> List[SearchResult]:
+def _score_search_results(
+    profile: CandidateProfile,
+    results: List[SearchResult],
+    queue: ApplicationQueue,
+    history: AppliedJobRegistry,
+) -> tuple[List[SearchResult], List[SearchResult]]:
+    blacklist = [entry for entry in profile.job_preferences.blacklisted_companies if entry.strip()]
+    filtered: List[SearchResult] = []
+    skipped: List[SearchResult] = []
     for result in results:
         description = result.description or result.snippet or ""
         posting = JobPosting(
@@ -180,11 +234,33 @@ def _score_search_results(profile: CandidateProfile, results: List[SearchResult]
             apply_url=result.link,
             contact_email=result.contact_email,
         )
+        if blacklist and (
+            _matches_blacklist(posting.company, blacklist)
+            or _matches_blacklist(result.source, blacklist)
+            or _matches_blacklist(result.title, blacklist)
+        ):
+            result.is_blacklisted = True
+            skipped.append(result)
+            continue
         assessment = analyse_job_fit(profile, posting)
         result.match_score = assessment.match_score
         if not result.description:
             result.description = description
-    return results
+        queue_match = queue.find_matching(posting)
+        history_match = history.find(posting)
+        if queue_match:
+            result.is_duplicate = True
+            result.duplicate_reason = (
+                f"Queued for {queue_match.apply_at.isoformat(timespec='minutes')} (status: {queue_match.status})"
+            )
+        elif history_match:
+            result.is_duplicate = True
+            result.duplicate_reason = (
+                f"Applied {history_match.last_seen_at.isoformat(timespec='minutes')}"
+                f" (status: {history_match.last_status or 'unknown'})"
+            )
+        filtered.append(result)
+    return filtered, skipped
 
 
 def _queue_search_result(
@@ -195,7 +271,7 @@ def _queue_search_result(
     cover_template: str,
     custom_resume_template: Optional[str] = None,
     custom_cover_template: Optional[str] = None,
-) -> QueuedApplication:
+) -> Optional[QueuedApplication]:
     posting = JobPosting(
         title=result.title,
         company=result.source or "Unknown",
@@ -203,6 +279,27 @@ def _queue_search_result(
         apply_url=result.link,
         contact_email=result.contact_email,
     )
+    blacklist = st.session_state.profile.job_preferences.blacklisted_companies
+    if blacklist and (
+        _matches_blacklist(posting.company, blacklist)
+        or _matches_blacklist(result.source, blacklist)
+        or _matches_blacklist(posting.title, blacklist)
+    ):
+        st.warning("This company is on your blacklist; adjust preferences to queue it.")
+        return None
+    queue_match = st.session_state.queue.find_matching(posting)
+    if queue_match:
+        st.warning(
+            f"Already queued for {queue_match.apply_at.isoformat(timespec='minutes')} (status: {queue_match.status})."
+        )
+        return None
+    history_match = st.session_state.history.find(posting)
+    if history_match:
+        st.warning(
+            f"You previously applied on {history_match.last_seen_at.isoformat(timespec='minutes')}"
+            f" (status: {history_match.last_status or 'unknown'})."
+        )
+        return None
     queued = QueuedApplication(
         posting=posting,
         apply_at=schedule_time,
@@ -246,6 +343,11 @@ def _render_profile_tab() -> None:
             value="\n".join(prefs.focus_domains),
             help="Industries or domains to prioritise during searches.",
         )
+        blacklist_text = st.text_area(
+            "Company blacklist",
+            value="\n".join(prefs.blacklisted_companies),
+            help="Employers to skip automatically (one per line).",
+        )
         felon_friendly = st.checkbox(
             "Require felon friendly roles",
             value=prefs.felon_friendly_only,
@@ -270,6 +372,9 @@ def _render_profile_tab() -> None:
 
             prefs.locations = [loc.strip() for loc in locations_text.splitlines() if loc.strip()]
             prefs.focus_domains = [domain.strip() for domain in domains_text.splitlines() if domain.strip()]
+            prefs.blacklisted_companies = [
+                company.strip() for company in blacklist_text.splitlines() if company.strip()
+            ]
             prefs.felon_friendly_only = felon_friendly
 
             st.session_state.profile = profile
@@ -482,8 +587,35 @@ def _render_search_tab() -> None:
 
     results = st.session_state.get("search_results", [])
     if results:
-        scored_results = _score_search_results(profile, list(results))
+        scored_results, skipped_blacklisted = _score_search_results(
+            profile,
+            list(results),
+            st.session_state.queue,
+            st.session_state.history,
+        )
         st.session_state.search_results = scored_results
+        if skipped_blacklisted:
+            st.info(
+                f"Skipped {len(skipped_blacklisted)} result(s) due to blacklist preferences."
+            )
+
+        sort_choice = st.selectbox(
+            "Sort results by",
+            ["Match score", "Published date", "Company name"],
+            index=0,
+        )
+        if sort_choice == "Published date":
+            scored_results.sort(key=lambda res: res.published_at or datetime.min, reverse=True)
+        elif sort_choice == "Company name":
+            scored_results.sort(key=lambda res: (res.source or "").lower())
+        else:
+            scored_results.sort(key=lambda res: res.match_score or 0.0, reverse=True)
+
+        duplicate_count = sum(1 for res in scored_results if res.is_duplicate)
+        if duplicate_count:
+            st.warning(
+                f"{duplicate_count} result(s) look similar to queued or completed applications."
+            )
 
         min_match = st.slider(
             "Minimum match score",
@@ -519,6 +651,9 @@ def _render_search_tab() -> None:
                     "is_company_site": result.is_company_site,
                     "match_score": result.match_score,
                     "contact_email": result.contact_email,
+                    "published_at": result.published_at.isoformat() if result.published_at else None,
+                    "is_duplicate": result.is_duplicate,
+                    "duplicate_reason": result.duplicate_reason,
                 }
             )
         st.download_button(
@@ -600,7 +735,12 @@ def _render_search_tab() -> None:
             score_pct = int(round((result.match_score or 0) * 100))
             header = f"{result.title} — {score_pct}% match"
             with st.expander(header, expanded=False):
-                st.caption(f"Source: {result.source}")
+                meta = [f"Source: {result.source}"]
+                if result.published_at:
+                    meta.append(f"Posted {result.published_at.strftime('%Y-%m-%d %H:%M')}")
+                st.caption(" • ".join(meta))
+                if result.is_duplicate and result.duplicate_reason:
+                    st.warning(f"Possible duplicate: {result.duplicate_reason}")
                 if result.contact_email:
                     st.info(f"Contact email: {result.contact_email}")
                 st.markdown(f"[Open apply link]({result.link})")
@@ -633,11 +773,12 @@ def _render_search_tab() -> None:
                         custom_resume_template=resume_custom_for_actions if resume_choice == "custom" else None,
                         custom_cover_template=cover_custom_for_actions if cover_choice == "custom" else None,
                     )
-                    st.success(f"Queued {queued.job_id} for immediate processing.")
-                    st.experimental_rerun()
+                    if queued:
+                        st.success(f"Queued {queued.job_id} for immediate processing.")
+                        st.experimental_rerun()
                 if action_cols[1].button("Save for later", key=f"queue_later_{idx}"):
                     scheduled_time = datetime.now() + timedelta(hours=12)
-                    _queue_search_result(
+                    queued = _queue_search_result(
                         result,
                         scheduled_time,
                         resume_template=resume_choice,
@@ -645,7 +786,8 @@ def _render_search_tab() -> None:
                         custom_resume_template=resume_custom_for_actions if resume_choice == "custom" else None,
                         custom_cover_template=cover_custom_for_actions if cover_choice == "custom" else None,
                     )
-                    st.success(f"Queued for {scheduled_time.isoformat(timespec='minutes')}.")
+                    if queued:
+                        st.success(f"Queued for {scheduled_time.isoformat(timespec='minutes')}.")
                 if action_cols[2].button("Skip", key=f"queue_skip_{idx}"):
                     st.session_state.search_results = [
                         existing
@@ -668,7 +810,7 @@ def _render_search_tab() -> None:
             for result in scored_results:
                 key = result.link or result.title
                 if key in selection_set:
-                    _queue_search_result(
+                    queued = _queue_search_result(
                         result,
                         apply_time,
                         resume_template=resume_choice,
@@ -676,8 +818,9 @@ def _render_search_tab() -> None:
                         custom_resume_template=st.session_state.custom_resume_template if resume_choice == "custom" else None,
                         custom_cover_template=st.session_state.custom_cover_template if cover_choice == "custom" else None,
                     )
-                    apply_time += timedelta(minutes=interval_minutes)
-                    queued_count += 1
+                    if queued:
+                        apply_time += timedelta(minutes=interval_minutes)
+                        queued_count += 1
             st.session_state.search_selected = []
             st.success(f"Queued {queued_count} jobs starting {start_time.isoformat(timespec='minutes')}.")
     else:
@@ -1073,6 +1216,7 @@ def _render_queue_tab() -> None:
             col1, col2, col3 = st.columns(3)
             if col1.button("Mark applied", key=f"queue_apply_{idx}"):
                 application.mark_success()
+                st.session_state.history.record(application.posting, status=application.status)
                 _save_state()
                 st.experimental_rerun()
             if col2.button("Reschedule", key=f"queue_reschedule_{idx}"):
@@ -1090,20 +1234,24 @@ def _render_queue_tab() -> None:
                 application.record_outcome("interview")
                 for skill in application.posting.tags:
                     inventory.record_interview(skill)
+                st.session_state.history.record(application.posting, status=application.status)
                 _save_state()
                 st.experimental_rerun()
             if outcome_cols[1].button("Offer", key=f"queue_outcome_offer_{idx}"):
                 application.record_outcome("offer")
                 for skill in application.posting.tags:
                     inventory.record_offer(skill)
+                st.session_state.history.record(application.posting, status=application.status)
                 _save_state()
                 st.experimental_rerun()
             if outcome_cols[2].button("Rejected", key=f"queue_outcome_rejected_{idx}"):
                 application.record_outcome("rejected")
+                st.session_state.history.record(application.posting, status=application.status)
                 _save_state()
                 st.experimental_rerun()
             if outcome_cols[3].button("Ghosted", key=f"queue_outcome_ghosted_{idx}"):
                 application.record_outcome("ghosted")
+                st.session_state.history.record(application.posting, status=application.status)
                 _save_state()
                 st.experimental_rerun()
 

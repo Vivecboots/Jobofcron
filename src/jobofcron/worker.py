@@ -14,6 +14,7 @@ from .document_generation import (
     generate_cover_letter,
     generate_resume,
 )
+from .job_history import AppliedJobRegistry
 from .job_matching import MatchAssessment, analyse_job_fit
 from .profile import CandidateProfile
 from .skills_inventory import SkillsInventory
@@ -48,7 +49,7 @@ class JobAutomationWorker:
         self.email_sender = email_sender
 
     def run_once(self, *, dry_run: bool = False) -> None:
-        profile, inventory, queue = self._load_state()
+        profile, inventory, queue, history = self._load_state()
         now = datetime.now()
         due = queue.due(now)
 
@@ -90,6 +91,7 @@ class JobAutomationWorker:
 
                     if sent:
                         task.mark_success()
+                        history.record(task.posting, status=task.status)
                         continue
                 elif email_target and self.email_sender is None:
                     task.notes.append(
@@ -110,6 +112,7 @@ class JobAutomationWorker:
                     )
                     if submitted:
                         task.mark_success()
+                        history.record(task.posting, status=task.status)
                     else:
                         task.mark_failure("No submit button detected")
                         task.defer(now + self.retry_delay)
@@ -124,7 +127,7 @@ class JobAutomationWorker:
                 task.defer(now + self.retry_delay)
                 print(f"Automation failed: {exc}")
 
-        self.storage.save(profile, inventory, queue)
+        self.storage.save(profile, inventory, queue, history)
 
     def run_forever(self, *, interval: int = 300, dry_run: bool = False) -> None:
         while True:
@@ -194,11 +197,13 @@ class JobAutomationWorker:
         return resume_path, cover_path
 
     def _load_state(self) -> tuple:
-        profile, inventory, queue = self.storage.load()
+        profile, inventory, queue, history = self.storage.load()
         if profile is None:
             profile = CandidateProfile(name="Unknown", email="unknown@example.com")
         if inventory is None:
             inventory = SkillsInventory()
         if queue is None:
             queue = ApplicationQueue()
-        return profile, inventory, queue
+        if history is None:
+            history = AppliedJobRegistry()
+        return profile, inventory, queue, history

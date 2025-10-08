@@ -4,6 +4,7 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 from datetime import datetime
 from typing import Iterable, List, Optional
+from urllib.parse import urlparse
 
 from .job_matching import JobPosting
 
@@ -134,14 +135,56 @@ class ApplicationQueue:
 
     items: List[QueuedApplication] = field(default_factory=list)
 
+    @staticmethod
+    def _normalise_url(url: Optional[str]) -> Optional[str]:
+        if not url:
+            return None
+        parsed = urlparse(url)
+        netloc = parsed.netloc.lower()
+        path = parsed.path.rstrip("/")
+        query = f"?{parsed.query}" if parsed.query else ""
+        if not netloc and not path:
+            return None
+        return f"{netloc}{path}{query}" or None
+
+    @staticmethod
+    def _normalise_text(value: Optional[str]) -> str:
+        if not value:
+            return ""
+        return " ".join(value.strip().lower().split())
+
+    def find_matching(self, posting: JobPosting) -> Optional[QueuedApplication]:
+        target_url = self._normalise_url(posting.apply_url)
+        target_title = self._normalise_text(posting.title)
+        target_company = self._normalise_text(posting.company)
+        for application in self.items:
+            other = application.posting
+            other_url = self._normalise_url(other.apply_url)
+            if target_url and other_url and target_url == other_url:
+                return application
+            if (
+                target_title
+                and target_company
+                and target_title == self._normalise_text(other.title)
+                and target_company == self._normalise_text(other.company)
+            ):
+                return application
+        return None
+
     def add(self, application: QueuedApplication) -> None:
-        existing = self.get(application.job_id)
-        if existing:
-            # Replace existing entry while preserving accumulated notes.
+        existing = self.find_matching(application.posting)
+        if existing and existing.job_id != application.job_id:
             application.notes = existing.notes + application.notes
             application.attempts = existing.attempts
             application.last_error = existing.last_error
-            self.items = [app for app in self.items if app.job_id != application.job_id]
+            self.items = [app for app in self.items if app.job_id != existing.job_id]
+        else:
+            existing = self.get(application.job_id)
+            if existing:
+                application.notes = existing.notes + application.notes
+                application.attempts = existing.attempts
+                application.last_error = existing.last_error
+                self.items = [app for app in self.items if app.job_id != application.job_id]
         self.items.append(application)
 
     def get(self, job_id: str) -> Optional[QueuedApplication]:

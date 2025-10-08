@@ -24,12 +24,14 @@ class JobPreference:
             searches.
         felon_friendly_only: Whether to restrict searches to postings that
             indicate they are open to candidates with felonies.
+        blacklisted_companies: Employers to skip automatically.
     """
 
     min_salary: Optional[int] = None
     locations: List[str] = field(default_factory=list)
     focus_domains: List[str] = field(default_factory=list)
     felon_friendly_only: bool = False
+    blacklisted_companies: List[str] = field(default_factory=list)
 
     def to_dict(self) -> Dict[str, object]:
         """Serialise the preference to a plain dictionary."""
@@ -43,6 +45,7 @@ class JobPreference:
         locations: Optional[List[str]] = None,
         focus_domains: Optional[List[str]] = None,
         felon_friendly_only: Optional[bool] = None,
+        blacklisted_companies: Optional[List[str]] = None,
     ) -> None:
         """Update the preference in-place with non-``None`` values."""
 
@@ -54,6 +57,8 @@ class JobPreference:
             self.focus_domains = focus_domains
         if felon_friendly_only is not None:
             self.felon_friendly_only = felon_friendly_only
+        if blacklisted_companies is not None:
+            self.blacklisted_companies = blacklisted_companies
 
 
 @dataclass
@@ -140,6 +145,7 @@ class CandidateProfile:
             locations=list(pref_data.get("locations", [])),
             focus_domains=list(pref_data.get("focus_domains", [])),
             felon_friendly_only=pref_data.get("felon_friendly_only", False),
+            blacklisted_companies=list(pref_data.get("blacklisted_companies", [])),
         )
 
         experiences = [

@@ -15,6 +15,7 @@ from __future__ import annotations
 import html
 import re
 from dataclasses import dataclass
+from datetime import datetime
 from typing import Iterable, List, Optional
 from urllib.parse import urlparse
 
@@ -50,6 +51,10 @@ class SearchResult:
     description: Optional[str] = None
     contact_email: Optional[str] = None
     match_score: Optional[float] = None
+    published_at: Optional[datetime] = None
+    is_duplicate: bool = False
+    duplicate_reason: Optional[str] = None
+    is_blacklisted: bool = False
 
 
 class GoogleJobSearch:
@@ -118,6 +123,13 @@ class GoogleJobSearch:
             snippet = entry.get("snippet") or ""
             domain = cls._normalise_domain(link)
             is_company = bool(domain) and not cls._is_aggregator(domain)
+            published_at: Optional[datetime] = None
+            date_str = entry.get("date")
+            if isinstance(date_str, str):
+                try:
+                    published_at = datetime.fromisoformat(date_str)
+                except ValueError:
+                    published_at = None
             results.append(
                 SearchResult(
                     title=title.strip(),
@@ -125,6 +137,7 @@ class GoogleJobSearch:
                     snippet=snippet.strip(),
                     source=domain or "unknown",
                     is_company_site=is_company,
+                    published_at=published_at,
                 )
             )
         return results
@@ -206,6 +219,19 @@ class CraigslistSearch:
             if snippet_match:
                 snippet_raw = re.sub(r"<.*?>", " ", snippet_match.group("snippet"))
                 snippet = re.sub(r"\s+", " ", html.unescape(snippet_raw)).strip()
+            published_at: Optional[datetime] = None
+            time_window = html_text[match.start(): match.end() + 400]
+            time_match = re.search(r"<time[^>]+datetime=\"([^\"]+)\"", time_window, flags=re.IGNORECASE)
+            if time_match:
+                raw_time = time_match.group(1)
+                cleaned = raw_time.replace(" ", "T")
+                try:
+                    published_at = datetime.fromisoformat(cleaned)
+                except ValueError:
+                    try:
+                        published_at = datetime.strptime(raw_time, "%Y-%m-%d %H:%M")
+                    except ValueError:
+                        published_at = None
 
             source = GoogleJobSearch._normalise_domain(link)
             description, contact_email = self._fetch_listing_details(link)
@@ -218,6 +244,7 @@ class CraigslistSearch:
                     is_company_site=True,
                     description=description or snippet,
                     contact_email=contact_email,
+                    published_at=published_at,
                 )
             )
         return results
