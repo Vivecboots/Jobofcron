@@ -1136,6 +1136,7 @@ def _render_documents_tab() -> None:
     )
     use_ai = st.session_state.get(use_ai_state_key, use_ai_default)
 
+
     def _ensure_ai_model_session(provider: str) -> str:
         key = f"ai_model_{provider}"
         if key not in st.session_state:
@@ -1155,6 +1156,7 @@ def _render_documents_tab() -> None:
     ):
         st.session_state[ai_provider_state_key] = default_provider
 
+
     prompt_style_state_key = "documents_ai_prompt_style"
     default_prompt_style = "general" if "general" in prompt_styles else prompt_styles[0]
     if (
@@ -1170,6 +1172,7 @@ def _render_documents_tab() -> None:
     if use_ai:
         st.markdown("### AI configuration")
         st.selectbox(
+
             "AI provider",
             provider_choices,
             key=ai_provider_state_key,
@@ -1222,6 +1225,7 @@ def _render_documents_tab() -> None:
         st.caption(
             "Reference resumes are stored for when you enable the AI generator above."
         )
+
 
     with st.form("documents_form"):
         title = st.text_input("Job title", value=selected.title if selected else "")
