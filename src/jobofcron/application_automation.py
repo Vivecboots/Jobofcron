@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import asyncio
+from concurrent.futures import ThreadPoolExecutor
 import random
 import smtplib
 from email.message import EmailMessage
@@ -80,15 +81,25 @@ class DirectApplyAutomation:
             print("[dry-run] Would launch browser and submit application to", posting.apply_url)
             return True
 
-        return asyncio.run(
-            self._apply_async(
-                profile,
-                posting,
-                resume_path=resume_path,
-                cover_letter_path=cover_letter_path,
-                answers=answers or {},
+        def _runner() -> bool:
+            return asyncio.run(
+                self._apply_async(
+                    profile,
+                    posting,
+                    resume_path=resume_path,
+                    cover_letter_path=cover_letter_path,
+                    answers=answers or {},
+                )
             )
-        )
+
+        try:
+            asyncio.get_running_loop()
+        except RuntimeError:
+            return _runner()
+
+        with ThreadPoolExecutor(max_workers=1) as executor:
+            future = executor.submit(_runner)
+            return future.result()
 
     async def _apply_async(
         self,
