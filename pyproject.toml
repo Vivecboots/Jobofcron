@@ -5,10 +5,13 @@ build-backend = "setuptools.build_meta"
 [project]
 name = "jobofcron"
 version = "0.1.0"
-description = "Toolkit for automating Indeed job applications"
+description = "Toolkit for automating job applications"
 readme = "README.md"
 requires-python = ">=3.10"
 authors = [{name = "Jobofcron"}]
+dependencies = [
+    "requests>=2.31",
+]
 
 [tool.setuptools.packages.find]
 where = ["src"]

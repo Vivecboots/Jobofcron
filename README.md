@@ -1,10 +1,10 @@
 # Jobofcron
 
-Jobofcron is a roadmap for an automated Indeed job application assistant that tailors each submission to the candidate's background, salary expectations, and location preferences while pacing applications to avoid spammy behaviour.
+Jobofcron is a roadmap for an automated job application assistant that tailors each submission to the candidate's background, salary expectations, and location preferences while pacing applications to avoid spammy behaviour.
 
 ## System Overview
 - **User profile manager** – stores personal information, work history, skills, certifications, felony-friendly notes, and preferred industries. This evolves over time by asking the user for missing details.
-- **Job discovery engine** – searches Indeed for remote or location-specific roles that meet salary and felon-friendly filters while focusing on selected domains.
+- **Job discovery engine** – searches Google for job + location queries, prioritising results that land on company career sites so we can apply directly and avoid aggregator anti-bot hurdles.
 - **Evaluation & matching** – compares job descriptions with the stored talent/skills inventory to determine fit and to decide whether to request more info from the user.
 - **Resume & cover letter generator** – adapts resume sections and cover letters using the known profile plus any job-specific prompts from the user.
 - **Application scheduler** – queues applications, spaces them out with configurable breaks, and tracks submission history to avoid rate limits.
@@ -12,7 +12,7 @@ Jobofcron is a roadmap for an automated Indeed job application assistant that ta
 
 ## Workflow at a Glance
 1. Collect initial user profile (resume, experience, salary minimum, locations, felon-friendly requirements).
-2. Run job searches on Indeed filtered by the profile constraints.
+2. Run Google job searches filtered by the profile constraints and favour direct company application links.
 3. Score each posting using the evaluation engine; request clarifications from the user when required.
 4. Generate tailored resume/cover letter packages.
 5. Apply according to the scheduler, respecting cool-down periods.
@@ -26,7 +26,8 @@ Initial scaffolding for the automation toolkit now lives under ``src/jobofcron``
 - ``skills_inventory.py`` – tracks skills encountered in job descriptions and the resulting outcomes.
 - ``scheduler.py`` – spaces applications over time with configurable breaks.
 - ``storage.py`` – persists profiles and skill snapshots to JSON for iterative learning.
-- ``cli.py`` – a small command line utility for updating preferences, adding skills, and planning application pacing.
+- ``cli.py`` – a small command line utility for updating preferences, adding skills, planning application pacing, and sourcing direct-apply leads from Google.
+- ``job_search.py`` – SerpAPI-backed helpers that query Google, flag aggregator domains, and filter for company-owned listings.
 - ``job_matching.py`` – heuristics that analyse job descriptions, surface questions for the candidate, and suggest resume updates.
 
 ### Running the CLI
@@ -38,6 +39,7 @@ python -m jobofcron.cli prefs --min-salary 85000 --locations "Remote" "Austin, T
 python -m jobofcron.cli add-skill "Customer Success"
 python -m jobofcron.cli plan --titles "Success Manager" "Support Lead" --companies "Acme" "Globex"
 python -m jobofcron.cli analyze --title "Customer Success Manager" --company "Acme" --location "Remote" --salary '$70,000 - $90,000' --description-file posting.txt
+python -m jobofcron.cli search --title "Customer Success Manager" --location "Austin, TX" --limit 5 --direct-only --sample-response samples/serpapi_demo_response.json --verbose
 ```
 
 If you prefer not to install the package, prefix commands with
@@ -51,8 +53,15 @@ regular demand. When providing shell arguments that contain ``$`` (such as
 salary ranges), wrap them in single quotes so the shell does not treat them as
 environment variable lookups.
 
+The ``search`` command uses [SerpAPI](https://serpapi.com/) to run Google queries
+like "Customer Success Manager job Austin, TX". Set ``SERPAPI_KEY`` in your
+environment (or pass ``--serpapi-key``) to perform live searches, or provide a
+saved response via ``--sample-response`` for offline experimentation. Results are
+tagged as ``DIRECT`` when the detected domain is not a known aggregator, helping
+you focus on company-owned application flows.
+
 ## Next Steps
-- Hook up real Indeed search/scrape integration.
+- Integrate automated form filling for company career portals (Greenhouse, Lever, Workday, etc.).
 - Extend document generation to tailor resumes and cover letters automatically.
 - Build an event loop/service that executes the planned schedule and records outcomes.
 

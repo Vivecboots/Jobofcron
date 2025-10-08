@@ -2,11 +2,14 @@
 from __future__ import annotations
 
 import argparse
+import json
+import os
 from datetime import datetime
 from pathlib import Path
 from typing import List
 
 from .job_matching import JobPosting, analyse_job_fit
+from .job_search import GoogleJobSearch
 from .profile import CandidateProfile
 from .scheduler import plan_schedule
 from .skills_inventory import SkillsInventory
@@ -168,6 +171,52 @@ def cmd_analyze(args: argparse.Namespace) -> None:
         print("\nFelon-friendly signal: No clear information provided; follow up if this is a requirement.")
 
 
+def cmd_search(args: argparse.Namespace) -> None:
+    profile, _, _ = load_or_init(Path(args.storage))
+
+    location = args.location
+    if not location:
+        preferences = profile.job_preferences.locations
+        if preferences:
+            location = preferences[0]
+    if not location:
+        raise SystemExit("Provide --location or save a default location via prefs.")
+
+    results = []
+
+    if args.sample_response:
+        payload = json.loads(Path(args.sample_response).read_text(encoding="utf-8"))
+        results = GoogleJobSearch.parse_results(payload)
+    else:
+        api_key = args.serpapi_key or os.getenv("SERPAPI_KEY") or os.getenv("SERPAPI_API_KEY")
+        if not api_key:
+            raise SystemExit("Set SERPAPI_KEY or pass --serpapi-key to run live searches.")
+        searcher = GoogleJobSearch(api_key=api_key, engine=args.engine)
+        results = searcher.search_jobs(
+            title=args.title,
+            location=location,
+            max_results=args.limit,
+            remote=args.remote,
+            extra_terms=args.extra or None,
+        )
+
+    if args.direct_only:
+        results = GoogleJobSearch.filter_direct_apply(results)
+
+    if not results:
+        print("No search results found.")
+        return
+
+    print(f"Top {len(results)} results for '{args.title}' near {location}:")
+    for idx, result in enumerate(results, start=1):
+        badge = "DIRECT" if result.is_company_site else "AGGREGATOR"
+        print(f"{idx:>2}. [{badge}] {result.title}")
+        print(f"    Source: {result.source}")
+        print(f"    Link:   {result.link}")
+        if args.verbose and result.snippet:
+            print(f"    Snippet: {result.snippet}")
+
+
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description="Jobofcron CLI")
     parser.add_argument("--storage", default=str(DEFAULT_STORAGE))
@@ -213,6 +262,29 @@ def build_parser() -> argparse.ArgumentParser:
     analyze.add_argument("--description")
     analyze.add_argument("--description-file")
     analyze.set_defaults(func=cmd_analyze)
+
+    search = subparsers.add_parser(
+        "search",
+        help="Search Google (via SerpAPI) for jobs and highlight direct-apply links",
+    )
+    search.add_argument("--title", required=True, help="Job title or keywords to search for")
+    search.add_argument("--location", help="Location to focus on; defaults to saved prefs")
+    search.add_argument("--remote", action="store_true", help="Hint the search to favour remote roles")
+    search.add_argument("--limit", type=int, default=10, help="Maximum number of search results to show")
+    search.add_argument("--extra", nargs="*", help="Additional search terms to append")
+    search.add_argument("--direct-only", action="store_true", help="Only show company-owned domains")
+    search.add_argument("--serpapi-key", help="Override the SERPAPI_KEY environment variable")
+    search.add_argument(
+        "--engine",
+        default="google",
+        help="SerpAPI engine to use (defaults to 'google')",
+    )
+    search.add_argument(
+        "--sample-response",
+        help="Load a saved SerpAPI response JSON file instead of making a live request",
+    )
+    search.add_argument("--verbose", action="store_true", help="Print search result snippets")
+    search.set_defaults(func=cmd_search)
 
     return parser
 

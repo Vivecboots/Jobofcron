@@ -1,0 +1,5 @@
+# Build artifacts
+src/jobofcron.egg-info/
+__pycache__/
+src/jobofcron/__pycache__/
+*.pyc
