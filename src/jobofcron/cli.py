@@ -6,6 +6,7 @@ from datetime import datetime
 from pathlib import Path
 from typing import List
 
+from .job_matching import JobPosting, analyse_job_fit
 from .profile import CandidateProfile
 from .scheduler import plan_schedule
 from .skills_inventory import SkillsInventory
@@ -100,6 +101,73 @@ def cmd_plan(args: argparse.Namespace) -> None:
         print(f"  {entry.apply_at.isoformat(timespec='minutes')} - {entry.job_title} @ {entry.company}")
 
 
+def cmd_analyze(args: argparse.Namespace) -> None:
+    profile, inventory, storage = load_or_init(Path(args.storage))
+
+    if args.description is None and args.description_file is None:
+        raise SystemExit("Provide either --description or --description-file")
+
+    description = args.description or Path(args.description_file).read_text(encoding="utf-8")
+    posting = JobPosting(
+        id=args.job_id,
+        title=args.title,
+        company=args.company,
+        location=args.location,
+        salary_text=args.salary,
+        description=description,
+        tags=args.tags or [],
+        felon_friendly=args.felon_friendly,
+    )
+
+    assessment = analyse_job_fit(profile, posting)
+    inventory.observe_skills(assessment.required_skills)
+    save_and_exit(profile, inventory, storage)
+
+    total_skills = len(assessment.required_skills)
+    matched = len(assessment.matched_skills)
+    score_pct = assessment.match_score * 100
+    print(f"Match score: {score_pct:.0f}% ({matched}/{total_skills or 1} skills covered)")
+
+    if assessment.required_skills:
+        print("Required skills detected:")
+        for skill in assessment.required_skills:
+            marker = "✔" if skill.lower() in {s.lower() for s in assessment.matched_skills} else "✖"
+            print(f"  {marker} {skill}")
+
+    if assessment.recommended_questions:
+        print("\nQuestions to clarify:")
+        for question in assessment.recommended_questions:
+            print(f"  - {question}")
+
+    if assessment.recommended_profile_updates:
+        print("\nResume/Cover letter focus:")
+        for update in assessment.recommended_profile_updates:
+            print(f"  - {update}")
+
+    if assessment.salary_notes:
+        print("\nSalary notes:")
+        for note in assessment.salary_notes:
+            print(f"  - {note}")
+    elif assessment.meets_salary is True:
+        print("\nSalary notes:")
+        print("  - Posting appears to meet your minimum salary preference.")
+
+    if assessment.location_notes:
+        print("\nLocation notes:")
+        for note in assessment.location_notes:
+            print(f"  - {note}")
+    elif assessment.meets_location is True:
+        print("\nLocation notes:")
+        print("  - Posting aligns with your saved location preferences.")
+
+    if assessment.felon_friendly is True:
+        print("\nFelon-friendly signal: Posting explicitly welcomes justice-impacted candidates.")
+    elif assessment.felon_friendly is False:
+        print("\nFelon-friendly signal: Posting may require a clean record; investigate further before applying.")
+    else:
+        print("\nFelon-friendly signal: No clear information provided; follow up if this is a requirement.")
+
+
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description="Jobofcron CLI")
     parser.add_argument("--storage", default=str(DEFAULT_STORAGE))
@@ -131,6 +199,20 @@ def build_parser() -> argparse.ArgumentParser:
     plan.add_argument("--interval", type=int, default=10)
     plan.add_argument("--break-every", dest="break_every", type=int, default=5)
     plan.set_defaults(func=cmd_plan)
+
+    analyze = subparsers.add_parser("analyze", help="Assess how well a job posting fits the saved profile")
+    analyze.add_argument("--job-id")
+    analyze.add_argument("--title", required=True)
+    analyze.add_argument("--company", required=True)
+    analyze.add_argument("--location")
+    analyze.add_argument("--salary")
+    analyze.add_argument("--tags", nargs="*")
+    analyze.add_argument("--felon-friendly", dest="felon_friendly", action="store_true")
+    analyze.add_argument("--no-felon-friendly", dest="felon_friendly", action="store_false")
+    analyze.set_defaults(felon_friendly=None)
+    analyze.add_argument("--description")
+    analyze.add_argument("--description-file")
+    analyze.set_defaults(func=cmd_analyze)
 
     return parser
 

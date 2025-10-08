@@ -27,6 +27,7 @@ Initial scaffolding for the automation toolkit now lives under ``src/jobofcron``
 - ``scheduler.py`` – spaces applications over time with configurable breaks.
 - ``storage.py`` – persists profiles and skill snapshots to JSON for iterative learning.
 - ``cli.py`` – a small command line utility for updating preferences, adding skills, and planning application pacing.
+- ``job_matching.py`` – heuristics that analyse job descriptions, surface questions for the candidate, and suggest resume updates.
 
 ### Running the CLI
 
@@ -36,11 +37,19 @@ python -m jobofcron.cli show
 python -m jobofcron.cli prefs --min-salary 85000 --locations "Remote" "Austin, TX"
 python -m jobofcron.cli add-skill "Customer Success"
 python -m jobofcron.cli plan --titles "Success Manager" "Support Lead" --companies "Acme" "Globex"
+python -m jobofcron.cli analyze --title "Customer Success Manager" --company "Acme" --location "Remote" --salary '$70,000 - $90,000' --description-file posting.txt
 ```
 
 If you prefer not to install the package, prefix commands with
 ``PYTHONPATH=src``. The CLI stores data in ``jobofcron_data.json`` by default.
 You can point to an alternate location with ``--storage``.
+
+The ``analyze`` command will ingest either ``--description`` text or
+``--description-file`` contents, score the match, suggest clarifying questions,
+and log the skills it discovered so future applications know they are in
+regular demand. When providing shell arguments that contain ``$`` (such as
+salary ranges), wrap them in single quotes so the shell does not treat them as
+environment variable lookups.
 
 ## Next Steps
 - Hook up real Indeed search/scrape integration.
