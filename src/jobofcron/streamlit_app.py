@@ -1127,6 +1127,7 @@ def _render_documents_tab() -> None:
 
 
     use_ai_state_key = "documents_use_ai_enabled"
+
     if use_ai_state_key not in st.session_state:
         st.session_state[use_ai_state_key] = has_ai_env
     use_ai = st.checkbox(
@@ -1180,6 +1181,7 @@ def _render_documents_tab() -> None:
     if use_ai:
         st.markdown("### AI configuration")
         st.selectbox(
+
             "AI provider",
             provider_choices,
             key=ai_provider_state_key,
@@ -1195,10 +1197,12 @@ def _render_documents_tab() -> None:
             help="Tailor output for technical, sales, customer success, leadership, and other role families.",
         )
         model_default = PROVIDER_DEFAULT_MODELS.get(ai_provider, "gpt-4o-mini")
+
         _bind_text_input(
             "AI model",
             state_key=model_key,
             help_text=f"Suggested default: {model_default}",
+
         )
         st.slider(
             "AI creativity",
@@ -1207,10 +1211,12 @@ def _render_documents_tab() -> None:
             step=0.05,
             key=temperature_state_key,
         )
+
         _bind_text_input(
             "AI API key",
             state_key=key_key,
             password=True,
+
         )
     else:
         ai_provider = st.session_state[ai_provider_state_key]
@@ -1219,6 +1225,7 @@ def _render_documents_tab() -> None:
         st.caption(
             "Enable the AI generator above to configure the provider, prompt focus, model, creativity, and API key.",
         )
+
 
     ai_provider = st.session_state[ai_provider_state_key]
     model_key = _ensure_ai_model_session(ai_provider)
@@ -1245,6 +1252,7 @@ def _render_documents_tab() -> None:
             value=selected.snippet if selected else "",
             height=220,
         )
+
         tags_text = st.text_input("Tags", value="")
         output_dir = st.text_input("Output directory", value="generated_documents")
         enqueue = st.checkbox("Add to queue", value=False)
