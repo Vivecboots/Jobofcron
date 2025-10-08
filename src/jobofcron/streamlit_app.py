@@ -11,7 +11,7 @@ import csv
 import json
 import os
 import sys
-from datetime import datetime
+from datetime import datetime, timedelta
 from io import StringIO
 from pathlib import Path
 from typing import Iterable, List, Optional
@@ -27,6 +27,8 @@ if __package__ in {None, ""}:
         AIDocumentGenerator,
         DocumentGenerationDependencyError,
         DocumentGenerationError,
+        available_cover_letter_templates,
+        available_resume_templates,
         generate_cover_letter,
         generate_resume,
     )
@@ -41,6 +43,8 @@ else:
         AIDocumentGenerator,
         DocumentGenerationDependencyError,
         DocumentGenerationError,
+        available_cover_letter_templates,
+        available_resume_templates,
         generate_cover_letter,
         generate_resume,
     )
@@ -51,6 +55,38 @@ else:
     from .storage import Storage
 
 DEFAULT_STORAGE = Path(os.getenv("JOBOFCRON_STORAGE", "jobofcron_data.json"))
+
+DEFAULT_CUSTOM_RESUME_TEMPLATE = """$contact_block
+
+Target Role: $target_title at $target_company
+
+Key Highlights
+$matched_skills
+
+Professional Experience
+$experience
+
+Additional Skills
+$additional_skills
+"""
+
+DEFAULT_CUSTOM_COVER_TEMPLATE = """$today
+
+$company Hiring Team,
+
+I am excited to apply for the $title role and share how my background aligns with your needs.
+
+Highlights
+$matched_skills
+
+Focus Areas
+$focus_points
+
+Thank you for your consideration.
+
+Sincerely,
+$name
+"""
 
 
 def _slugify(*parts: str) -> str:
@@ -85,6 +121,18 @@ def _initialise_session_state() -> None:
         st.session_state.loaded_storage_path = st.session_state.storage_path
     if "search_results" not in st.session_state:
         st.session_state.search_results = []
+    if "search_selected" not in st.session_state:
+        st.session_state.search_selected = []
+    if "search_min_match" not in st.session_state:
+        st.session_state.search_min_match = 0
+    if "custom_resume_template" not in st.session_state:
+        st.session_state.custom_resume_template = DEFAULT_CUSTOM_RESUME_TEMPLATE
+    if "custom_cover_template" not in st.session_state:
+        st.session_state.custom_cover_template = DEFAULT_CUSTOM_COVER_TEMPLATE
+    if "resume_template_choice" not in st.session_state:
+        st.session_state.resume_template_choice = "traditional"
+    if "cover_template_choice" not in st.session_state:
+        st.session_state.cover_template_choice = "traditional"
 
 
 def _reload_state_if_needed(path_text: str) -> None:
@@ -105,10 +153,71 @@ def _save_state() -> None:
 def _export_results_to_csv(results: Iterable[SearchResult]) -> bytes:
     buffer = StringIO()
     writer = csv.writer(buffer)
-    writer.writerow(["title", "link", "snippet", "source", "is_company_site"])
+    writer.writerow(["title", "link", "snippet", "source", "is_company_site", "match_score", "contact_email"])
     for result in results:
-        writer.writerow([result.title, result.link, result.snippet, result.source, "yes" if result.is_company_site else "no"])
+        score = f"{result.match_score * 100:.0f}%" if result.match_score is not None else ""
+        writer.writerow(
+            [
+                result.title,
+                result.link,
+                result.snippet,
+                result.source,
+                "yes" if result.is_company_site else "no",
+                score,
+                result.contact_email or "",
+            ]
+        )
     return buffer.getvalue().encode("utf-8")
+
+
+def _score_search_results(profile: CandidateProfile, results: List[SearchResult]) -> List[SearchResult]:
+    for result in results:
+        description = result.description or result.snippet or ""
+        posting = JobPosting(
+            title=result.title,
+            company=result.source or "Unknown",
+            description=description,
+            apply_url=result.link,
+            contact_email=result.contact_email,
+        )
+        assessment = analyse_job_fit(profile, posting)
+        result.match_score = assessment.match_score
+        if not result.description:
+            result.description = description
+    return results
+
+
+def _queue_search_result(
+    result: SearchResult,
+    schedule_time: datetime,
+    *,
+    resume_template: str,
+    cover_template: str,
+    custom_resume_template: Optional[str] = None,
+    custom_cover_template: Optional[str] = None,
+) -> QueuedApplication:
+    posting = JobPosting(
+        title=result.title,
+        company=result.source or "Unknown",
+        description=result.description or result.snippet or "",
+        apply_url=result.link,
+        contact_email=result.contact_email,
+    )
+    queued = QueuedApplication(
+        posting=posting,
+        apply_at=schedule_time,
+        resume_template=resume_template,
+        cover_letter_template=cover_template,
+        custom_resume_template=custom_resume_template,
+        custom_cover_letter_template=custom_cover_template,
+    )
+    st.session_state.queue.add(queued)
+    _save_state()
+    return queued
+
+
+def _template_label(name: str) -> str:
+    return name.replace("_", " ").title()
 
 
 def _render_profile_tab() -> None:
@@ -184,6 +293,66 @@ def _render_profile_tab() -> None:
         st.write(sorted(profile.skills))
     else:
         st.info("No skills recorded yet. Use the field above to add them.")
+
+
+def _render_dashboard_tab() -> None:
+    profile: CandidateProfile = st.session_state.profile
+    inventory: SkillsInventory = st.session_state.inventory
+    queue: ApplicationQueue = st.session_state.queue
+
+    st.subheader(f"Welcome back, {profile.name.split(' ')[0] if profile.name else 'job seeker'}")
+
+    pending = queue.pending()
+    outcomes = {}
+    for application in queue.items:
+        if application.outcome:
+            outcomes[application.outcome] = outcomes.get(application.outcome, 0) + 1
+
+    cols = st.columns(3)
+    cols[0].metric("Pending applications", len(pending))
+    cols[1].metric("Total queued", len(queue.items))
+    cols[2].metric("Skills tracked", len(inventory.sorted_by_opportunity()))
+
+    if pending:
+        upcoming = sorted(pending, key=lambda app: app.apply_at)[:5]
+        st.markdown("### Upcoming applications")
+        st.table(
+            [
+                {
+                    "Job": f"{app.posting.title} @ {app.posting.company}",
+                    "Apply at": app.apply_at.isoformat(timespec="minutes"),
+                }
+                for app in upcoming
+            ]
+        )
+    else:
+        st.info("No pending applications scheduled. Use the search or documents tab to queue new opportunities.")
+
+    if outcomes:
+        st.markdown("### Outcomes so far")
+        st.table(
+            [
+                {"Outcome": outcome.title(), "Count": count}
+                for outcome, count in sorted(outcomes.items())
+            ]
+        )
+    else:
+        st.info("Log interview or offer outcomes from the queue tab to start building performance insights.")
+
+    top_skills = inventory.sorted_by_opportunity()[:5]
+    if top_skills:
+        st.markdown("### High-impact skills")
+        st.table(
+            [
+                {
+                    "Skill": record.name,
+                    "Seen": record.occurrences,
+                    "Interviews": record.interviews,
+                    "Offers": record.offers,
+                }
+                for record in top_skills
+            ]
+        )
 
 
 def _run_search(
@@ -313,25 +482,204 @@ def _render_search_tab() -> None:
 
     results = st.session_state.get("search_results", [])
     if results:
-        table_data = [
-            {
-                "Title": result.title,
-                "Source": result.source,
-                "Company site?": "Yes" if result.is_company_site else "No",
-                "Link": result.link,
-                "Snippet": result.snippet,
-            }
-            for result in results
-        ]
-        st.dataframe(table_data, use_container_width=True, hide_index=True)
+        scored_results = _score_search_results(profile, list(results))
+        st.session_state.search_results = scored_results
 
-        csv_bytes = _export_results_to_csv(results)
+        min_match = st.slider(
+            "Minimum match score",
+            min_value=0,
+            max_value=100,
+            value=int(st.session_state.search_min_match),
+        )
+        st.session_state.search_min_match = min_match
+
+        filtered_results = [
+            result for result in scored_results if int(round((result.match_score or 0) * 100)) >= min_match
+        ]
+
+        st.caption(f"Showing {len(filtered_results)} of {len(scored_results)} results above the match threshold.")
+
+        csv_bytes = _export_results_to_csv(filtered_results)
         st.download_button(
             "Export results to CSV",
             data=csv_bytes,
             file_name="jobofcron_search_results.csv",
             mime="text/csv",
         )
+
+        json_payload = []
+        for result in filtered_results:
+            json_payload.append(
+                {
+                    "title": result.title,
+                    "link": result.link,
+                    "snippet": result.snippet,
+                    "description": result.description,
+                    "source": result.source,
+                    "is_company_site": result.is_company_site,
+                    "match_score": result.match_score,
+                    "contact_email": result.contact_email,
+                }
+            )
+        st.download_button(
+            "Export results to JSON",
+            data=json.dumps(json_payload, indent=2).encode("utf-8"),
+            file_name="jobofcron_search_results.json",
+            mime="application/json",
+        )
+
+        resume_options = available_resume_templates()
+        if "custom" not in resume_options:
+            resume_options.append("custom")
+        resume_options = sorted(resume_options, key=lambda name: {"traditional": 0, "modern": 1, "minimal": 2, "custom": 3}.get(name, 99))
+        cover_options = available_cover_letter_templates()
+        if "custom" not in cover_options:
+            cover_options.append("custom")
+        cover_options = sorted(cover_options, key=lambda name: {"traditional": 0, "modern": 1, "minimal": 2, "custom": 3}.get(name, 99))
+
+        with st.expander("Batch queue options", expanded=False):
+            start_time = st.datetime_input(
+                "Start scheduling from",
+                value=datetime.now().replace(second=0, microsecond=0),
+                key="batch_start_time",
+            )
+            interval_minutes = st.number_input(
+                "Minutes between applications",
+                min_value=1,
+                max_value=180,
+                value=15,
+                step=1,
+            )
+            resume_choice = st.selectbox(
+                "Resume template",
+                resume_options,
+                index=resume_options.index(st.session_state.resume_template_choice)
+                if st.session_state.resume_template_choice in resume_options
+                else 0,
+                format_func=_template_label,
+            )
+            st.session_state.resume_template_choice = resume_choice
+            custom_resume_text = None
+            if resume_choice == "custom":
+                custom_resume_text = st.text_area(
+                    "Custom resume template",
+                    value=st.session_state.custom_resume_template,
+                    height=220,
+                    help="Use $placeholders such as $name, $matched_skills, $experience, $additional_skills.",
+                )
+                st.session_state.custom_resume_template = custom_resume_text
+
+            cover_choice = st.selectbox(
+                "Cover letter template",
+                cover_options,
+                index=cover_options.index(st.session_state.cover_template_choice)
+                if st.session_state.cover_template_choice in cover_options
+                else 0,
+                format_func=_template_label,
+            )
+            st.session_state.cover_template_choice = cover_choice
+            custom_cover_text = None
+            if cover_choice == "custom":
+                custom_cover_text = st.text_area(
+                    "Custom cover letter template",
+                    value=st.session_state.custom_cover_template,
+                    height=220,
+                    help="Use $placeholders such as $today, $company, $title, $matched_skills, $focus_points.",
+                )
+                st.session_state.custom_cover_template = custom_cover_text
+
+        selected_keys = set(st.session_state.search_selected or [])
+        resume_custom_for_actions = (
+            st.session_state.custom_resume_template if resume_choice == "custom" else custom_resume_text
+        )
+        cover_custom_for_actions = (
+            st.session_state.custom_cover_template if cover_choice == "custom" else custom_cover_text
+        )
+
+        for idx, result in enumerate(filtered_results):
+            score_pct = int(round((result.match_score or 0) * 100))
+            header = f"{result.title} — {score_pct}% match"
+            with st.expander(header, expanded=False):
+                st.caption(f"Source: {result.source}")
+                if result.contact_email:
+                    st.info(f"Contact email: {result.contact_email}")
+                st.markdown(f"[Open apply link]({result.link})")
+                if result.description:
+                    st.markdown("### Preview")
+                    st.write(result.description)
+                elif result.snippet:
+                    st.write(result.snippet)
+
+                selection_key = result.link or result.title
+                selected = st.checkbox(
+                    "Select for batch queue",
+                    value=selection_key in selected_keys,
+                    key=f"search_select_{idx}",
+                )
+                if selected and selection_key not in selected_keys:
+                    st.session_state.search_selected.append(selection_key)
+                    selected_keys.add(selection_key)
+                elif not selected and selection_key in selected_keys:
+                    st.session_state.search_selected.remove(selection_key)
+                    selected_keys.remove(selection_key)
+
+                action_cols = st.columns(3)
+                if action_cols[0].button("Queue now", key=f"queue_now_{idx}"):
+                    queued = _queue_search_result(
+                        result,
+                        datetime.now(),
+                        resume_template=resume_choice,
+                        cover_template=cover_choice,
+                        custom_resume_template=resume_custom_for_actions if resume_choice == "custom" else None,
+                        custom_cover_template=cover_custom_for_actions if cover_choice == "custom" else None,
+                    )
+                    st.success(f"Queued {queued.job_id} for immediate processing.")
+                    st.experimental_rerun()
+                if action_cols[1].button("Save for later", key=f"queue_later_{idx}"):
+                    scheduled_time = datetime.now() + timedelta(hours=12)
+                    _queue_search_result(
+                        result,
+                        scheduled_time,
+                        resume_template=resume_choice,
+                        cover_template=cover_choice,
+                        custom_resume_template=resume_custom_for_actions if resume_choice == "custom" else None,
+                        custom_cover_template=cover_custom_for_actions if cover_choice == "custom" else None,
+                    )
+                    st.success(f"Queued for {scheduled_time.isoformat(timespec='minutes')}.")
+                if action_cols[2].button("Skip", key=f"queue_skip_{idx}"):
+                    st.session_state.search_results = [
+                        existing
+                        for existing in st.session_state.search_results
+                        if not (
+                            existing.link == result.link and existing.title == result.title
+                        )
+                    ]
+                    if selection_key in selected_keys:
+                        st.session_state.search_selected.remove(selection_key)
+                    st.experimental_rerun()
+
+        if st.button(
+            "Queue selected jobs",
+            disabled=not st.session_state.search_selected,
+        ):
+            apply_time = start_time
+            queued_count = 0
+            selection_set = set(st.session_state.search_selected)
+            for result in scored_results:
+                key = result.link or result.title
+                if key in selection_set:
+                    _queue_search_result(
+                        result,
+                        apply_time,
+                        resume_template=resume_choice,
+                        cover_template=cover_choice,
+                        custom_resume_template=st.session_state.custom_resume_template if resume_choice == "custom" else None,
+                        custom_cover_template=st.session_state.custom_cover_template if cover_choice == "custom" else None,
+                    )
+                    apply_time += timedelta(minutes=interval_minutes)
+                    queued_count += 1
+            st.session_state.search_selected = []
+            st.success(f"Queued {queued_count} jobs starting {start_time.isoformat(timespec='minutes')}.")
     else:
         st.info("Run a search to see direct-apply opportunities.")
 
@@ -476,6 +824,7 @@ def _render_documents_tab() -> None:
         location = st.text_input("Location", value="")
         salary = st.text_input("Salary info", value="")
         apply_url = st.text_input("Apply URL", value=selected.link if selected else "")
+        contact_email = st.text_input("Contact email", value=selected.contact_email if selected else "")
         description = st.text_area(
             "Job description",
             value=selected.snippet if selected else "",
@@ -504,6 +853,52 @@ def _render_documents_tab() -> None:
                 value=datetime.now(),
                 key="documents_schedule_time",
             )
+        resume_options = available_resume_templates()
+        if "custom" not in resume_options:
+            resume_options.append("custom")
+        resume_options = sorted(resume_options, key=lambda name: {"traditional": 0, "modern": 1, "minimal": 2, "custom": 3}.get(name, 99))
+        cover_options = available_cover_letter_templates()
+        if "custom" not in cover_options:
+            cover_options.append("custom")
+        cover_options = sorted(cover_options, key=lambda name: {"traditional": 0, "modern": 1, "minimal": 2, "custom": 3}.get(name, 99))
+
+        resume_choice = st.selectbox(
+            "Resume template",
+            resume_options,
+            index=resume_options.index(st.session_state.resume_template_choice)
+            if st.session_state.resume_template_choice in resume_options
+            else 0,
+            format_func=_template_label,
+        )
+        st.session_state.resume_template_choice = resume_choice
+        resume_custom_text = None
+        if resume_choice == "custom":
+            resume_custom_text = st.text_area(
+                "Custom resume template",
+                value=st.session_state.custom_resume_template,
+                height=220,
+                help="Use $placeholders such as $name, $matched_skills, $experience, $additional_skills.",
+            )
+            st.session_state.custom_resume_template = resume_custom_text
+
+        cover_choice = st.selectbox(
+            "Cover letter template",
+            cover_options,
+            index=cover_options.index(st.session_state.cover_template_choice)
+            if st.session_state.cover_template_choice in cover_options
+            else 0,
+            format_func=_template_label,
+        )
+        st.session_state.cover_template_choice = cover_choice
+        cover_custom_text = None
+        if cover_choice == "custom":
+            cover_custom_text = st.text_area(
+                "Custom cover letter template",
+                value=st.session_state.custom_cover_template,
+                height=220,
+                help="Use $placeholders such as $today, $company, $title, $matched_skills, $focus_points.",
+            )
+            st.session_state.custom_cover_template = cover_custom_text
         submitted = st.form_submit_button("Generate documents")
 
     if not submitted:
@@ -527,6 +922,7 @@ def _render_documents_tab() -> None:
         description=description,
         tags=[tag.strip() for tag in tags_text.split(",") if tag.strip()],
         apply_url=apply_url.strip() or (selected.link if selected else None),
+        contact_email=contact_email.strip() or (selected.contact_email if selected else None),
     )
     assessment = analyse_job_fit(profile, posting)
     inventory.observe_skills(assessment.required_skills)
@@ -547,8 +943,20 @@ def _render_documents_tab() -> None:
             st.error(str(exc))
             return
     else:
-        resume_text = generate_resume(profile, posting, assessment)
-        cover_text = generate_cover_letter(profile, posting, assessment)
+        resume_text = generate_resume(
+            profile,
+            posting,
+            assessment,
+            style=resume_choice,
+            custom_template=resume_custom_text if resume_choice == "custom" else None,
+        )
+        cover_text = generate_cover_letter(
+            profile,
+            posting,
+            assessment,
+            style=cover_choice,
+            custom_template=cover_custom_text if cover_choice == "custom" else None,
+        )
 
     directory = Path(output_dir.strip() or "generated_documents")
     directory.mkdir(parents=True, exist_ok=True)
@@ -571,6 +979,10 @@ def _render_documents_tab() -> None:
             apply_at=schedule_time,
             resume_path=str(resume_path),
             cover_letter_path=str(cover_path),
+            resume_template=resume_choice,
+            cover_letter_template=cover_choice,
+            custom_resume_template=resume_custom_text if resume_choice == "custom" else None,
+            custom_cover_letter_template=cover_custom_text if cover_choice == "custom" else None,
         )
         if use_ai and generator:
             queued.notes.append(f"Documents generated with AI model {generator.model}.")
@@ -636,6 +1048,10 @@ def _render_queue_tab() -> None:
         with st.expander(header, expanded=False):
             st.write(f"Scheduled for: {application.apply_at.isoformat(timespec='minutes')}")
             st.write(f"Status: {application.status}")
+            if application.posting.apply_url:
+                st.write(f"Apply URL: {application.posting.apply_url}")
+            if application.posting.contact_email:
+                st.write(f"Contact email: {application.posting.contact_email}")
             if application.resume_path:
                 st.write(f"Resume: {application.resume_path}")
             if application.cover_letter_path:
@@ -707,6 +1123,7 @@ def main() -> None:
 
     tabs = st.tabs(
         [
+            "Dashboard",
             "Profile",
             "Job search",
             "Job analysis",
@@ -717,16 +1134,18 @@ def main() -> None:
     )
 
     with tabs[0]:
-        _render_profile_tab()
+        _render_dashboard_tab()
     with tabs[1]:
-        _render_search_tab()
+        _render_profile_tab()
     with tabs[2]:
-        _render_analysis_tab()
+        _render_search_tab()
     with tabs[3]:
-        _render_documents_tab()
+        _render_analysis_tab()
     with tabs[4]:
-        _render_skills_tab()
+        _render_documents_tab()
     with tabs[5]:
+        _render_skills_tab()
+    with tabs[6]:
         _render_queue_tab()
 
 

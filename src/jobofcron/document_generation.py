@@ -3,7 +3,8 @@ from __future__ import annotations
 
 import os
 from datetime import datetime
-from typing import Iterable, List, Optional
+from string import Template
+from typing import Dict, Iterable, List, Optional
 
 from .job_matching import JobPosting, MatchAssessment
 from .profile import CandidateProfile, Experience
@@ -40,17 +41,45 @@ def _format_experience(experiences: Iterable[Experience]) -> List[str]:
     return lines
 
 
-def generate_resume(
+def _build_resume_context(
+    profile: CandidateProfile,
+    posting: JobPosting,
+    assessment: MatchAssessment,
+) -> Dict[str, str]:
+    remaining_skills = [
+        skill
+        for skill in profile.skills
+        if skill.lower() not in {match.lower() for match in assessment.matched_skills}
+    ]
+
+    context: Dict[str, str] = {
+        "name": profile.name,
+        "email": profile.email,
+        "phone": profile.phone or "",
+        "summary": profile.summary or "",
+        "target_title": posting.title,
+        "target_company": posting.company,
+        "contact_block": "\n".join(_format_contact_block(profile)),
+        "matched_skills": "\n".join(f"- {skill}" for skill in assessment.matched_skills) or "",
+        "additional_skills": "\n".join(f"- {skill}" for skill in remaining_skills) or "",
+        "certifications": "\n".join(f"- {cert}" for cert in profile.certifications) or "",
+        "experience": "\n".join(_format_experience(profile.experiences)) or "",
+        "missing_skills": "\n".join(f"- {skill}" for skill in assessment.missing_skills) or "",
+        "notes": "\n".join(f"- {topic}: {note}" for topic, note in profile.additional_notes.items())
+        if profile.additional_notes
+        else "",
+    }
+    return context
+
+
+def _resume_traditional(
     profile: CandidateProfile,
     posting: JobPosting,
     assessment: MatchAssessment,
 ) -> str:
-    """Create a lightweight resume draft emphasising the matched skills."""
-
     lines: List[str] = []
     lines.extend(_format_contact_block(profile))
     lines.append("")
-
     lines.append(f"Target Role: {posting.title} at {posting.company}")
     lines.append("")
 
@@ -98,13 +127,128 @@ def generate_resume(
     return "\n".join(line.rstrip() for line in lines).strip() + "\n"
 
 
-def generate_cover_letter(
+def _resume_modern(
     profile: CandidateProfile,
     posting: JobPosting,
     assessment: MatchAssessment,
 ) -> str:
-    """Create a conversational cover letter referencing the match assessment."""
+    lines: List[str] = []
+    lines.append(posting.title.upper())
+    lines.append(profile.name.title())
+    lines.append(" | ".join(bit for bit in [profile.email, profile.phone] if bit))
+    if profile.summary:
+        lines.extend(["", profile.summary.strip()])
 
+    if assessment.matched_skills:
+        lines.extend(["", "Impact Highlights"])
+        for skill in assessment.matched_skills:
+            lines.append(f"• Delivered measurable outcomes leveraging {skill}.")
+
+    if profile.experiences:
+        lines.extend(["", "Experience"])
+        for exp in sorted(profile.experiences, key=lambda e: e.start_date, reverse=True):
+            start = exp.start_date.strftime("%Y")
+            end = exp.end_date.strftime("%Y") if exp.end_date else "Present"
+            lines.append(f"{exp.role} — {exp.company} ({start}–{end})")
+            for achievement in exp.achievements or []:
+                lines.append(f"  · {achievement}")
+
+    if profile.skills:
+        lines.extend(["", "Core Skills", ", ".join(sorted(profile.skills))])
+
+    if profile.certifications:
+        lines.extend(["", "Certifications", ", ".join(profile.certifications)])
+
+    return "\n".join(line.rstrip() for line in lines).strip() + "\n"
+
+
+def _resume_minimal(
+    profile: CandidateProfile,
+    posting: JobPosting,
+    assessment: MatchAssessment,
+) -> str:
+    lines: List[str] = []
+    lines.append(profile.name)
+    lines.append(posting.title)
+    lines.append(profile.email)
+    if profile.phone:
+        lines.append(profile.phone)
+
+    lines.append("")
+    lines.append("Summary")
+    summary = profile.summary or "Motivated professional ready to contribute immediately."
+    lines.append(summary)
+
+    if assessment.matched_skills:
+        lines.append("")
+        lines.append("Top Skills")
+        lines.append(", ".join(assessment.matched_skills))
+
+    experience_lines = _format_experience(profile.experiences)
+    if experience_lines:
+        lines.append("")
+        lines.append("Experience")
+        lines.extend(experience_lines[:8])
+
+    return "\n".join(line.rstrip() for line in lines).strip() + "\n"
+
+
+RESUME_TEMPLATES = {
+    "traditional": _resume_traditional,
+    "modern": _resume_modern,
+    "minimal": _resume_minimal,
+}
+
+
+def generate_resume(
+    profile: CandidateProfile,
+    posting: JobPosting,
+    assessment: MatchAssessment,
+    *,
+    style: str = "traditional",
+    custom_template: Optional[str] = None,
+) -> str:
+    """Create a resume draft using one of the built-in styles or a custom template."""
+
+    template_key = style.lower()
+    if template_key == "custom":
+        if not custom_template:
+            raise ValueError("Provide custom_template text when using the custom resume style.")
+        context = _build_resume_context(profile, posting, assessment)
+        rendered = Template(custom_template).safe_substitute(context)
+        return rendered.strip() + "\n"
+
+    builder = RESUME_TEMPLATES.get(template_key, RESUME_TEMPLATES["traditional"])
+    return builder(profile, posting, assessment)
+
+
+def _cover_letter_context(
+    profile: CandidateProfile,
+    posting: JobPosting,
+    assessment: MatchAssessment,
+) -> Dict[str, str]:
+    return {
+        "name": profile.name,
+        "email": profile.email,
+        "phone": profile.phone or "",
+        "company": posting.company,
+        "title": posting.title,
+        "today": datetime.now().strftime("%B %d, %Y"),
+        "matched_skills": "\n".join(f"- {skill}" for skill in assessment.matched_skills) or "",
+        "focus_points": "\n".join(
+            f"- {update}" for update in assessment.recommended_profile_updates[:5]
+        )
+        if assessment.recommended_profile_updates
+        else "",
+        "missing_skills": "\n".join(f"- {skill}" for skill in assessment.missing_skills) or "",
+    }
+
+
+def _cover_letter_traditional(
+    profile: CandidateProfile,
+    posting: JobPosting,
+    assessment: MatchAssessment,
+) -> str:
     today = datetime.now().strftime("%B %d, %Y")
     lines: List[str] = [today, "", posting.company, "", "Dear Hiring Manager,"]
 
@@ -133,7 +277,9 @@ def generate_cover_letter(
         lines.append("")
 
     if assessment.salary_notes:
-        lines.append("I appreciate the transparency around compensation and would value a conversation to confirm mutual fit on salary expectations.")
+        lines.append(
+            "I appreciate the transparency around compensation and would value a conversation to confirm mutual fit on salary expectations."
+        )
         lines.append("")
 
     if assessment.location_notes:
@@ -146,6 +292,111 @@ def generate_cover_letter(
     lines.extend([closing, "", "Sincerely,", profile.name])
 
     return "\n".join(line.rstrip() for line in lines).strip() + "\n"
+
+
+def _cover_letter_modern(
+    profile: CandidateProfile,
+    posting: JobPosting,
+    assessment: MatchAssessment,
+) -> str:
+    lines: List[str] = []
+    lines.append(datetime.now().strftime("%d %B %Y"))
+    lines.append("")
+    lines.append(f"{posting.company} Hiring Team")
+    lines.append("")
+    lines.append(f"Hello {posting.company} team,")
+    lines.append("")
+    lines.append(
+        f"Your {posting.title} opening stood out because it calls for professionals who build relationships and deliver measurable impact."
+    )
+
+    if assessment.matched_skills:
+        lines.append("")
+        lines.append("Highlights")
+        for skill in assessment.matched_skills[:4]:
+            lines.append(f"- Created wins leveraging {skill} across cross-functional teams.")
+
+    if assessment.recommended_profile_updates:
+        lines.append("")
+        lines.append("What I'll bring next")
+        for update in assessment.recommended_profile_updates[:3]:
+            lines.append(f"- {update}")
+
+    lines.append("")
+    lines.append(
+        "I'd welcome 20 minutes to explore how I can help the team hit its next set of goals."
+    )
+    lines.append("")
+    lines.append("Best regards,")
+    lines.append(profile.name)
+
+    return "\n".join(line.rstrip() for line in lines).strip() + "\n"
+
+
+def _cover_letter_minimal(
+    profile: CandidateProfile,
+    posting: JobPosting,
+    assessment: MatchAssessment,
+) -> str:
+    lines: List[str] = []
+    lines.append(datetime.now().strftime("%Y-%m-%d"))
+    lines.append("")
+    lines.append(f"To {posting.company},")
+    lines.append("")
+    lines.append(f"I am interested in the {posting.title} role.")
+    if assessment.matched_skills:
+        lines.append(
+            "My background covers " + ", ".join(assessment.matched_skills[:5]) + "."
+        )
+    lines.append(
+        "Let's connect to discuss how I can contribute immediately and learn where to focus first."
+    )
+    lines.append("")
+    lines.append("Thank you,")
+    lines.append(profile.name)
+
+    return "\n".join(line.rstrip() for line in lines).strip() + "\n"
+
+
+COVER_LETTER_TEMPLATES = {
+    "traditional": _cover_letter_traditional,
+    "modern": _cover_letter_modern,
+    "minimal": _cover_letter_minimal,
+}
+
+
+def generate_cover_letter(
+    profile: CandidateProfile,
+    posting: JobPosting,
+    assessment: MatchAssessment,
+    *,
+    style: str = "traditional",
+    custom_template: Optional[str] = None,
+) -> str:
+    """Create a cover letter draft using built-in styles or user-provided text."""
+
+    template_key = style.lower()
+    if template_key == "custom":
+        if not custom_template:
+            raise ValueError("Provide custom_template text when using the custom cover letter style.")
+        context = _cover_letter_context(profile, posting, assessment)
+        rendered = Template(custom_template).safe_substitute(context)
+        return rendered.strip() + "\n"
+
+    builder = COVER_LETTER_TEMPLATES.get(template_key, COVER_LETTER_TEMPLATES["traditional"])
+    return builder(profile, posting, assessment)
+
+
+def available_resume_templates() -> List[str]:
+    """Return the identifiers for bundled resume templates."""
+
+    return sorted(RESUME_TEMPLATES.keys())
+
+
+def available_cover_letter_templates() -> List[str]:
+    """Return the identifiers for bundled cover letter templates."""
+
+    return sorted(COVER_LETTER_TEMPLATES.keys())
 
 
 class AIDocumentGenerator:

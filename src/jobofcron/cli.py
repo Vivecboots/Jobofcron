@@ -4,11 +4,12 @@ from __future__ import annotations
 import argparse
 import json
 import os
+from dataclasses import asdict
 from datetime import datetime, timedelta
 from pathlib import Path
 from typing import List, Optional
 
-from .application_automation import AutomationDependencyError, DirectApplyAutomation
+from .application_automation import AutomationDependencyError, DirectApplyAutomation, EmailApplicationSender
 from .application_queue import ApplicationQueue, QueuedApplication
 from .document_generation import (
     AIDocumentGenerator,
@@ -63,6 +64,33 @@ def save_and_exit(
     storage: Storage,
 ) -> None:
     storage.save(profile, inventory, queue)
+
+
+def build_email_sender_from_args(args: argparse.Namespace) -> Optional[EmailApplicationSender]:
+    host = getattr(args, "email_host", None) or os.getenv("JOBOFCRON_SMTP_HOST")
+    if not host:
+        return None
+
+    port = getattr(args, "email_port", None) or os.getenv("JOBOFCRON_SMTP_PORT")
+    port_int = int(port) if port else 587
+
+    username = getattr(args, "email_username", None) or os.getenv("JOBOFCRON_SMTP_USERNAME")
+    password = getattr(args, "email_password", None) or os.getenv("JOBOFCRON_SMTP_PASSWORD")
+    from_address = getattr(args, "email_from", None) or os.getenv("JOBOFCRON_SMTP_FROM")
+
+    use_ssl = bool(getattr(args, "email_use_ssl", False) or os.getenv("JOBOFCRON_SMTP_USE_SSL", "").lower() in {"1", "true", "yes"})
+    disable_tls = bool(getattr(args, "email_disable_tls", False) or os.getenv("JOBOFCRON_SMTP_DISABLE_TLS", "").lower() in {"1", "true", "yes"})
+    use_tls = not use_ssl and not disable_tls
+
+    return EmailApplicationSender(
+        host=host,
+        port=port_int,
+        username=username,
+        password=password,
+        from_address=from_address,
+        use_tls=use_tls,
+        use_ssl=use_ssl,
+    )
 
 
 def _build_ai_generator(
@@ -172,6 +200,7 @@ def cmd_analyze(args: argparse.Namespace) -> None:
         tags=args.tags or [],
         felon_friendly=args.felon_friendly,
         apply_url=args.apply_url,
+        contact_email=args.contact_email,
     )
 
     assessment = analyse_job_fit(profile, posting)
@@ -255,6 +284,22 @@ def cmd_generate_documents(args: argparse.Namespace) -> None:
     resume_text: str
     cover_text: str
 
+    resume_template_text = (
+        Path(args.resume_template_file).read_text(encoding="utf-8")
+        if args.resume_template_file
+        else None
+    )
+    cover_template_text = (
+        Path(args.cover_template_file).read_text(encoding="utf-8")
+        if args.cover_template_file
+        else None
+    )
+
+    if args.resume_template == "custom" and not resume_template_text:
+        raise SystemExit("--resume-template-file is required when using the custom resume template")
+    if args.cover_template == "custom" and not cover_template_text:
+        raise SystemExit("--cover-template-file is required when using the custom cover letter template")
+
     if args.use_ai:
         generator = _build_ai_generator(
             api_key=args.ai_api_key,
@@ -267,8 +312,20 @@ def cmd_generate_documents(args: argparse.Namespace) -> None:
         except DocumentGenerationError as exc:
             raise SystemExit(str(exc))
     else:
-        resume_text = generate_resume(profile, posting, assessment)
-        cover_text = generate_cover_letter(profile, posting, assessment)
+        resume_text = generate_resume(
+            profile,
+            posting,
+            assessment,
+            style=args.resume_template,
+            custom_template=resume_template_text,
+        )
+        cover_text = generate_cover_letter(
+            profile,
+            posting,
+            assessment,
+            style=args.cover_template,
+            custom_template=cover_template_text,
+        )
 
     resume_path.write_text(resume_text, encoding="utf-8")
     cover_path.write_text(cover_text, encoding="utf-8")
@@ -285,6 +342,10 @@ def cmd_generate_documents(args: argparse.Namespace) -> None:
             apply_at=apply_at,
             resume_path=str(resume_path),
             cover_letter_path=str(cover_path),
+            resume_template=args.resume_template,
+            cover_letter_template=args.cover_template,
+            custom_resume_template=resume_template_text,
+            custom_cover_letter_template=cover_template_text,
         )
         if args.use_ai:
             task.notes.append(f"Documents generated with AI model {args.ai_model}.")
@@ -307,6 +368,7 @@ def cmd_apply(args: argparse.Namespace) -> None:
     now = datetime.now()
     resume_path: Optional[Path] = None
     cover_path: Optional[Path] = None
+    email_sender = build_email_sender_from_args(args)
 
     if args.queue_id:
         task = queue.get(args.queue_id)
@@ -332,6 +394,7 @@ def cmd_apply(args: argparse.Namespace) -> None:
             tags=args.tags or [],
             felon_friendly=args.felon_friendly,
             apply_url=args.apply_url,
+            contact_email=args.contact_email,
         )
         assessment = analyse_job_fit(profile, posting)
         inventory.observe_skills(assessment.required_skills)
@@ -355,12 +418,90 @@ def cmd_apply(args: argparse.Namespace) -> None:
                 except DocumentGenerationError as exc:
                     raise SystemExit(str(exc))
             else:
-                resume_text = generate_resume(profile, posting, assessment)
-                cover_text = generate_cover_letter(profile, posting, assessment)
+                resume_template_text = (
+                    Path(args.resume_template_file).read_text(encoding="utf-8")
+                    if args.resume_template_file
+                    else None
+                )
+                cover_template_text = (
+                    Path(args.cover_template_file).read_text(encoding="utf-8")
+                    if args.cover_template_file
+                    else None
+                )
+                if args.resume_template == "custom" and not resume_template_text:
+                    raise SystemExit("--resume-template-file is required when using the custom resume template")
+                if args.cover_template == "custom" and not cover_template_text:
+                    raise SystemExit("--cover-template-file is required when using the custom cover letter template")
+                resume_text = generate_resume(
+                    profile,
+                    posting,
+                    assessment,
+                    style=args.resume_template,
+                    custom_template=resume_template_text,
+                )
+                cover_text = generate_cover_letter(
+                    profile,
+                    posting,
+                    assessment,
+                    style=args.cover_template,
+                    custom_template=cover_template_text,
+                )
             resume_path.write_text(resume_text, encoding="utf-8")
             cover_path.write_text(cover_text, encoding="utf-8")
             print(f"Generated resume at {resume_path}")
             print(f"Generated cover letter at {cover_path}")
+
+    email_handled = False
+    email_target = bool(
+        posting.contact_email or (posting.apply_url and posting.apply_url.startswith("mailto:"))
+    )
+    if email_target and email_sender is not None:
+        try:
+            sent = email_sender.send(
+                profile,
+                posting,
+                resume_path=resume_path,
+                cover_letter_path=cover_path,
+                dry_run=args.dry_run,
+            )
+        except Exception as exc:  # pragma: no cover - SMTP integration
+            print(f"Email submission failed: {exc}")
+            if task:
+                task.mark_failure(str(exc))
+                task.defer(now + timedelta(minutes=args.retry_minutes))
+            email_handled = True
+        else:
+            if args.dry_run:
+                print("[dry-run] Would send an application email instead of using the browser automation.")
+                if task:
+                    task.notes.append("Dry run executed; email send simulated.")
+                    task.defer(now + timedelta(minutes=args.retry_minutes))
+                email_handled = True
+            elif sent:
+                print("Application email sent successfully.")
+                if task:
+                    task.mark_success()
+                email_handled = True
+    elif email_target and email_sender is None:
+        print("Email contact detected but SMTP settings are missing; cannot send email automation.")
+        if not posting.apply_url or posting.apply_url.startswith("mailto:"):
+            if task:
+                task.defer(now + timedelta(minutes=args.retry_minutes))
+                task.notes.append("SMTP configuration missing; email-only application deferred.")
+            else:
+                print("Provide SMTP credentials or specify a direct apply URL to continue.")
+            email_handled = True
+
+    if email_handled:
+        save_and_exit(profile, inventory, queue, storage)
+        return
+
+    if posting.apply_url and posting.apply_url.startswith("mailto:"):
+        print("Mailto apply link requires SMTP settings; aborting automation run.")
+        if task:
+            task.defer(now + timedelta(minutes=args.retry_minutes))
+        save_and_exit(profile, inventory, queue, storage)
+        return
 
     try:
         submitted = automation.apply(
@@ -431,6 +572,7 @@ def cmd_worker(args: argparse.Namespace) -> None:
             model=args.ai_model,
             temperature=args.ai_temperature,
         )
+    email_sender = build_email_sender_from_args(args)
     worker = JobAutomationWorker(
         Path(args.storage),
         documents_dir=documents_dir,
@@ -438,6 +580,7 @@ def cmd_worker(args: argparse.Namespace) -> None:
         timeout=args.timeout,
         retry_delay=timedelta(minutes=args.retry_minutes),
         ai_generator=ai_generator,
+        email_sender=email_sender,
     )
 
     if args.loop:
@@ -456,6 +599,9 @@ def cmd_search(args: argparse.Namespace) -> None:
             location = preferences[0]
     if not location:
         raise SystemExit("Provide --location or save a default location via prefs.")
+
+    if args.min_match_score < 0 or args.min_match_score > 100:
+        raise SystemExit("--min-match-score must be between 0 and 100")
 
     if args.provider != "google" and args.sample_response:
         raise SystemExit("--sample-response is only supported with the Google provider.")
@@ -493,6 +639,24 @@ def cmd_search(args: argparse.Namespace) -> None:
             extra_terms=args.extra or None,
         )
 
+    scored_results = []
+    min_score_fraction = (args.min_match_score or 0) / 100
+    for result in results:
+        description = result.description or result.snippet
+        posting = JobPosting(
+            title=result.title,
+            company=result.source or "Unknown",
+            description=description or "",
+            apply_url=result.link,
+            contact_email=result.contact_email,
+        )
+        assessment = analyse_job_fit(profile, posting)
+        result.match_score = assessment.match_score
+        if assessment.match_score >= min_score_fraction:
+            scored_results.append(result)
+
+    results = scored_results
+
     if not results:
         print("No search results found.")
         return
@@ -506,8 +670,109 @@ def cmd_search(args: argparse.Namespace) -> None:
         print(f"{idx:>2}. [{badge}] {result.title}")
         print(f"    Source: {result.source}")
         print(f"    Link:   {result.link}")
+        if result.match_score is not None:
+            print(f"    Match:  {int(round(result.match_score * 100))}%")
+        if result.contact_email:
+            print(f"    Email:  {result.contact_email}")
         if args.verbose and result.snippet:
             print(f"    Snippet: {result.snippet}")
+
+    if args.output:
+        payload = []
+        for result in results:
+            data = asdict(result)
+            if result.match_score is not None:
+                data["match_score"] = result.match_score
+                data["match_score_percent"] = round(result.match_score * 100, 2)
+            data["provider"] = args.provider
+            data["searched_location"] = location
+            payload.append(data)
+        Path(args.output).write_text(json.dumps(payload, indent=2), encoding="utf-8")
+        print(f"Saved filtered results to {args.output}")
+
+
+def cmd_batch_queue(args: argparse.Namespace) -> None:
+    profile, inventory, queue, storage = load_or_init(Path(args.storage))
+
+    payload = json.loads(Path(args.results).read_text(encoding="utf-8"))
+    if not isinstance(payload, list):
+        raise SystemExit("Results file must contain a JSON array of search results")
+
+    if args.min_match_score < 0 or args.min_match_score > 100:
+        raise SystemExit("--min-match-score must be between 0 and 100")
+
+    resume_template_text = None
+    cover_template_text = None
+    if args.resume_template == "custom":
+        if not args.resume_template_file:
+            raise SystemExit("--resume-template-file is required when resume template is 'custom'")
+        resume_template_text = Path(args.resume_template_file).read_text(encoding="utf-8")
+    elif args.resume_template_file:
+        resume_template_text = Path(args.resume_template_file).read_text(encoding="utf-8")
+
+    if args.cover_template == "custom":
+        if not args.cover_template_file:
+            raise SystemExit("--cover-template-file is required when cover template is 'custom'")
+        cover_template_text = Path(args.cover_template_file).read_text(encoding="utf-8")
+    elif args.cover_template_file:
+        cover_template_text = Path(args.cover_template_file).read_text(encoding="utf-8")
+
+    start_time = parse_iso_datetime(args.start) if args.start else datetime.now()
+    interval = timedelta(minutes=args.interval_minutes)
+    min_score_fraction = args.min_match_score / 100
+
+    queued = 0
+    apply_at = start_time
+    for item in payload:
+        if not isinstance(item, dict):
+            continue
+        score = item.get("match_score")
+        if score is None and item.get("match_score_percent") is not None:
+            try:
+                score = float(item.get("match_score_percent")) / 100
+            except (TypeError, ValueError):
+                score = None
+        if score is not None and score < min_score_fraction:
+            continue
+
+        description = item.get("description") or item.get("snippet") or ""
+        posting = JobPosting(
+            id=item.get("id") or item.get("job_id"),
+            title=item.get("title", "Unknown role"),
+            company=item.get("company") or item.get("source", "Unknown company"),
+            location=item.get("location"),
+            salary_text=item.get("salary_text"),
+            description=description,
+            tags=list(item.get("tags", [])),
+            felon_friendly=item.get("felon_friendly"),
+            apply_url=item.get("link") or item.get("apply_url"),
+            contact_email=item.get("contact_email"),
+        )
+
+        if not posting.apply_url and not posting.contact_email:
+            continue
+
+        task = QueuedApplication(
+            posting=posting,
+            apply_at=apply_at,
+            resume_template=args.resume_template,
+            cover_letter_template=args.cover_template,
+            custom_resume_template=resume_template_text,
+            custom_cover_letter_template=cover_template_text,
+        )
+        queue.add(task)
+        queued += 1
+        apply_at += interval
+
+    save_and_exit(profile, inventory, queue, storage)
+
+    if queued:
+        print(
+            f"Queued {queued} jobs starting {start_time.isoformat(timespec='minutes')}"
+            f" with {args.interval_minutes}-minute intervals."
+        )
+    else:
+        print("No jobs met the filtering criteria; nothing was queued.")
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -573,6 +838,7 @@ def build_parser() -> argparse.ArgumentParser:
     documents.add_argument("--description")
     documents.add_argument("--description-file")
     documents.add_argument("--apply-url")
+    documents.add_argument("--contact-email")
     documents.add_argument("--output-dir", default="generated_documents")
     documents.add_argument("--enqueue", action="store_true")
     documents.add_argument(
@@ -583,6 +849,18 @@ def build_parser() -> argparse.ArgumentParser:
     documents.add_argument("--ai-model", default="gpt-4o-mini")
     documents.add_argument("--ai-api-key")
     documents.add_argument("--ai-temperature", type=float, default=0.3)
+    documents.add_argument(
+        "--resume-template",
+        choices=["traditional", "modern", "minimal", "custom"],
+        default="traditional",
+    )
+    documents.add_argument("--resume-template-file")
+    documents.add_argument(
+        "--cover-template",
+        choices=["traditional", "modern", "minimal", "custom"],
+        default="traditional",
+    )
+    documents.add_argument("--cover-template-file")
     documents.set_defaults(func=cmd_generate_documents)
 
     apply_cmd = subparsers.add_parser("apply", help="Submit an application immediately")
@@ -599,6 +877,7 @@ def build_parser() -> argparse.ArgumentParser:
     apply_cmd.add_argument("--description")
     apply_cmd.add_argument("--description-file")
     apply_cmd.add_argument("--apply-url")
+    apply_cmd.add_argument("--contact-email")
     apply_cmd.add_argument("--resume")
     apply_cmd.add_argument("--cover-letter")
     apply_cmd.add_argument("--auto-documents", action="store_true")
@@ -607,6 +886,25 @@ def build_parser() -> argparse.ArgumentParser:
     apply_cmd.add_argument("--ai-api-key")
     apply_cmd.add_argument("--ai-temperature", type=float, default=0.3)
     apply_cmd.add_argument("--output-dir", default="generated_documents")
+    apply_cmd.add_argument(
+        "--resume-template",
+        choices=["traditional", "modern", "minimal", "custom"],
+        default="traditional",
+    )
+    apply_cmd.add_argument("--resume-template-file")
+    apply_cmd.add_argument(
+        "--cover-template",
+        choices=["traditional", "modern", "minimal", "custom"],
+        default="traditional",
+    )
+    apply_cmd.add_argument("--cover-template-file")
+    apply_cmd.add_argument("--email-host")
+    apply_cmd.add_argument("--email-port", type=int)
+    apply_cmd.add_argument("--email-username")
+    apply_cmd.add_argument("--email-password")
+    apply_cmd.add_argument("--email-from")
+    apply_cmd.add_argument("--email-use-ssl", action="store_true")
+    apply_cmd.add_argument("--email-disable-tls", action="store_true")
     apply_cmd.add_argument("--no-headless", action="store_true")
     apply_cmd.add_argument("--timeout", type=int, default=90)
     apply_cmd.add_argument("--dry-run", action="store_true")
@@ -639,7 +937,31 @@ def build_parser() -> argparse.ArgumentParser:
         help="Craigslist site slug or hostname (e.g. 'austin' or 'sfbay.craigslist.org')",
     )
     search.add_argument("--verbose", action="store_true", help="Print search result snippets")
+    search.add_argument("--min-match-score", type=int, default=0, help="Only show results scoring at or above this percent")
+    search.add_argument("--output", help="Write the filtered results to a JSON file for later processing")
     search.set_defaults(func=cmd_search)
+
+    batch = subparsers.add_parser(
+        "batch-queue",
+        help="Queue multiple jobs from a saved search results JSON file",
+    )
+    batch.add_argument("--results", required=True, help="Path to the JSON results file produced by the search command")
+    batch.add_argument("--start", help="ISO 8601 timestamp for the first scheduled application")
+    batch.add_argument("--interval-minutes", type=int, default=15, help="Minutes between each queued application")
+    batch.add_argument("--min-match-score", type=int, default=0, help="Only queue jobs at or above this match score")
+    batch.add_argument(
+        "--resume-template",
+        choices=["traditional", "modern", "minimal", "custom"],
+        default="traditional",
+    )
+    batch.add_argument("--resume-template-file")
+    batch.add_argument(
+        "--cover-template",
+        choices=["traditional", "modern", "minimal", "custom"],
+        default="traditional",
+    )
+    batch.add_argument("--cover-template-file")
+    batch.set_defaults(func=cmd_batch_queue)
 
     record = subparsers.add_parser(
         "record-outcome",
@@ -667,6 +989,13 @@ def build_parser() -> argparse.ArgumentParser:
     worker.add_argument("--ai-model", default="gpt-4o-mini")
     worker.add_argument("--ai-api-key")
     worker.add_argument("--ai-temperature", type=float, default=0.3)
+    worker.add_argument("--email-host")
+    worker.add_argument("--email-port", type=int)
+    worker.add_argument("--email-username")
+    worker.add_argument("--email-password")
+    worker.add_argument("--email-from")
+    worker.add_argument("--email-use-ssl", action="store_true")
+    worker.add_argument("--email-disable-tls", action="store_true")
     worker.set_defaults(func=cmd_worker)
 
     return parser

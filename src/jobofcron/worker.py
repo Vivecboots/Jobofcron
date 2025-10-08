@@ -6,7 +6,7 @@ from datetime import datetime, timedelta
 from pathlib import Path
 from typing import Optional
 
-from .application_automation import AutomationDependencyError, DirectApplyAutomation
+from .application_automation import AutomationDependencyError, DirectApplyAutomation, EmailApplicationSender
 from .application_queue import ApplicationQueue, QueuedApplication
 from .document_generation import (
     AIDocumentGenerator,
@@ -37,6 +37,7 @@ class JobAutomationWorker:
         timeout: int = 90,
         retry_delay: timedelta = timedelta(minutes=45),
         ai_generator: Optional[AIDocumentGenerator] = None,
+        email_sender: Optional[EmailApplicationSender] = None,
     ) -> None:
         self.storage = Storage(storage_path)
         self.documents_dir = documents_dir or Path("generated_documents")
@@ -44,6 +45,7 @@ class JobAutomationWorker:
         self.retry_delay = retry_delay
         self.automation = DirectApplyAutomation(headless=headless, timeout=timeout)
         self.ai_generator = ai_generator
+        self.email_sender = email_sender
 
     def run_once(self, *, dry_run: bool = False) -> None:
         profile, inventory, queue = self._load_state()
@@ -62,6 +64,38 @@ class JobAutomationWorker:
             resume_path, cover_path = self._ensure_documents(task, profile, assessment)
 
             try:
+                email_target = bool(
+                    task.posting.contact_email
+                    or (task.posting.apply_url and task.posting.apply_url.startswith("mailto:"))
+                )
+                if email_target and self.email_sender is not None:
+                    try:
+                        sent = self.email_sender.send(
+                            profile,
+                            task.posting,
+                            resume_path=resume_path,
+                            cover_letter_path=cover_path,
+                            dry_run=dry_run,
+                        )
+                    except Exception as exc:  # pragma: no cover - SMTP integration
+                        task.mark_failure(f"Email send failed: {exc}")
+                        task.defer(now + self.retry_delay)
+                        print(f"Email submission failed: {exc}")
+                        continue
+
+                    if dry_run:
+                        task.notes.append("Dry run executed; email send simulated.")
+                        task.defer(now + self.retry_delay)
+                        continue
+
+                    if sent:
+                        task.mark_success()
+                        continue
+                elif email_target and self.email_sender is None:
+                    task.notes.append(
+                        "Email application detected but SMTP settings were not provided; falling back to browser automation."
+                    )
+
                 if dry_run:
                     print(f"[dry-run] Would submit application to {task.posting.apply_url}")
                     task.notes.append("Dry run executed; application remains queued for a real run.")
@@ -116,9 +150,21 @@ class JobAutomationWorker:
                 resume_text = self.ai_generator.generate_resume(profile, task.posting, assessment)
             except DocumentGenerationError as exc:
                 task.notes.append(f"AI resume generation failed: {exc}")
-                resume_text = generate_resume(profile, task.posting, assessment)
+                resume_text = generate_resume(
+                    profile,
+                    task.posting,
+                    assessment,
+                    style=task.resume_template,
+                    custom_template=task.custom_resume_template,
+                )
         else:
-            resume_text = generate_resume(profile, task.posting, assessment)
+            resume_text = generate_resume(
+                profile,
+                task.posting,
+                assessment,
+                style=task.resume_template,
+                custom_template=task.custom_resume_template,
+            )
         resume_path.write_text(resume_text, encoding="utf-8")
         task.resume_path = str(resume_path)
 
@@ -127,9 +173,21 @@ class JobAutomationWorker:
                 cover_letter = self.ai_generator.generate_cover_letter(profile, task.posting, assessment)
             except DocumentGenerationError as exc:
                 task.notes.append(f"AI cover letter generation failed: {exc}")
-                cover_letter = generate_cover_letter(profile, task.posting, assessment)
+                cover_letter = generate_cover_letter(
+                    profile,
+                    task.posting,
+                    assessment,
+                    style=task.cover_letter_template,
+                    custom_template=task.custom_cover_letter_template,
+                )
         else:
-            cover_letter = generate_cover_letter(profile, task.posting, assessment)
+            cover_letter = generate_cover_letter(
+                profile,
+                task.posting,
+                assessment,
+                style=task.cover_letter_template,
+                custom_template=task.custom_cover_letter_template,
+            )
         cover_path.write_text(cover_letter, encoding="utf-8")
         task.cover_letter_path = str(cover_path)
 

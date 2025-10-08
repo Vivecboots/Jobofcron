@@ -2,9 +2,11 @@
 from __future__ import annotations
 
 import asyncio
+import smtplib
+from email.message import EmailMessage
 from pathlib import Path
 from typing import Mapping, Optional
-from urllib.parse import urlparse
+from urllib.parse import parse_qs, urlparse
 
 from .job_matching import JobPosting
 from .profile import CandidateProfile
@@ -266,3 +268,107 @@ class DirectApplyAutomation:
                 except Exception:
                     continue
         return False
+
+
+class EmailApplicationSender:
+    """Send job applications via SMTP using resume and cover letter attachments."""
+
+    def __init__(
+        self,
+        *,
+        host: str,
+        port: int = 587,
+        username: Optional[str] = None,
+        password: Optional[str] = None,
+        from_address: Optional[str] = None,
+        use_tls: bool = True,
+        use_ssl: bool = False,
+    ) -> None:
+        self.host = host
+        self.port = port
+        self.username = username
+        self.password = password
+        self.from_address = from_address
+        self.use_tls = use_tls
+        self.use_ssl = use_ssl
+
+    def _resolve_recipient(self, posting: JobPosting) -> tuple[Optional[str], Optional[str]]:
+        email = posting.contact_email
+        subject = None
+        if posting.apply_url and posting.apply_url.startswith("mailto:"):
+            parsed = urlparse(posting.apply_url)
+            if not email:
+                email = parsed.path
+            if parsed.query:
+                params = parse_qs(parsed.query)
+                if "subject" in params:
+                    subject = params["subject"][0]
+        return email, subject
+
+    def send(
+        self,
+        profile: CandidateProfile,
+        posting: JobPosting,
+        *,
+        resume_path: Optional[Path] = None,
+        cover_letter_path: Optional[Path] = None,
+        body_text: Optional[str] = None,
+        dry_run: bool = False,
+    ) -> bool:
+        recipient, subject_hint = self._resolve_recipient(posting)
+        if not recipient:
+            return False
+
+        subject = subject_hint or f"Application for {posting.title} - {profile.name}"
+        body = body_text
+        if not body and cover_letter_path and cover_letter_path.exists():
+            body = cover_letter_path.read_text(encoding="utf-8")
+        if not body:
+            body = (
+                f"Hello,\n\nPlease find my resume attached for the {posting.title} role.\n"
+                f"I look forward to discussing how my experience can support {posting.company}.\n\nBest,\n{profile.name}"
+            )
+
+        message = EmailMessage()
+        message["To"] = recipient
+        message["Subject"] = subject
+        message["From"] = self.from_address or profile.email
+        message.set_content(body)
+
+        if resume_path and resume_path.exists():
+            message.add_attachment(
+                resume_path.read_bytes(),
+                maintype="application",
+                subtype="octet-stream",
+                filename=resume_path.name,
+            )
+        if cover_letter_path and cover_letter_path.exists():
+            message.add_attachment(
+                cover_letter_path.read_bytes(),
+                maintype="application",
+                subtype="octet-stream",
+                filename=cover_letter_path.name,
+            )
+
+        if dry_run:
+            print(f"[dry-run] Would email {recipient} via SMTP server {self.host}:{self.port}")
+            return True
+
+        if self.use_ssl:
+            connection = smtplib.SMTP_SSL(self.host, self.port, timeout=30)
+        else:
+            connection = smtplib.SMTP(self.host, self.port, timeout=30)
+            if self.use_tls:
+                connection.starttls()
+
+        try:
+            if self.username and self.password:
+                connection.login(self.username, self.password)
+            connection.send_message(message)
+        finally:
+            try:
+                connection.quit()
+            except Exception:
+                connection.close()
+
+        return True

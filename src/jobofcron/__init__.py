@@ -1,11 +1,13 @@
 """Jobofcron – Indeed job application automation toolkit."""
 
-from .application_automation import AutomationDependencyError, DirectApplyAutomation
+from .application_automation import AutomationDependencyError, DirectApplyAutomation, EmailApplicationSender
 from .application_queue import ApplicationQueue, QueuedApplication
 from .document_generation import (
     AIDocumentGenerator,
     DocumentGenerationDependencyError,
     DocumentGenerationError,
+    available_cover_letter_templates,
+    available_resume_templates,
     generate_cover_letter,
     generate_resume,
 )
@@ -37,10 +39,13 @@ __all__ = [
     "QueuedApplication",
     "generate_resume",
     "generate_cover_letter",
+    "available_resume_templates",
+    "available_cover_letter_templates",
     "AIDocumentGenerator",
     "DocumentGenerationDependencyError",
     "DocumentGenerationError",
     "DirectApplyAutomation",
+    "EmailApplicationSender",
     "AutomationDependencyError",
     "JobAutomationWorker",
 ]

@@ -17,6 +17,10 @@ class QueuedApplication:
     status: str = "pending"
     resume_path: Optional[str] = None
     cover_letter_path: Optional[str] = None
+    resume_template: str = "traditional"
+    cover_letter_template: str = "traditional"
+    custom_resume_template: Optional[str] = None
+    custom_cover_letter_template: Optional[str] = None
     notes: List[str] = field(default_factory=list)
     attempts: int = 0
     last_error: Optional[str] = None
@@ -69,11 +73,16 @@ class QueuedApplication:
                 "tags": list(self.posting.tags),
                 "felon_friendly": self.posting.felon_friendly,
                 "apply_url": self.posting.apply_url,
+                "contact_email": self.posting.contact_email,
             },
             "apply_at": self.apply_at.isoformat(),
             "status": self.status,
             "resume_path": self.resume_path,
             "cover_letter_path": self.cover_letter_path,
+            "resume_template": self.resume_template,
+            "cover_letter_template": self.cover_letter_template,
+            "custom_resume_template": self.custom_resume_template,
+            "custom_cover_letter_template": self.custom_cover_letter_template,
             "notes": list(self.notes),
             "attempts": self.attempts,
             "last_error": self.last_error,
@@ -96,6 +105,7 @@ class QueuedApplication:
             tags=list(posting_data.get("tags", [])),
             felon_friendly=posting_data.get("felon_friendly"),
             apply_url=posting_data.get("apply_url"),
+            contact_email=posting_data.get("contact_email"),
         )
         apply_at = datetime.fromisoformat(payload["apply_at"])
         return cls(
@@ -104,6 +114,10 @@ class QueuedApplication:
             status=payload.get("status", "pending"),
             resume_path=payload.get("resume_path"),
             cover_letter_path=payload.get("cover_letter_path"),
+            resume_template=payload.get("resume_template", "traditional"),
+            cover_letter_template=payload.get("cover_letter_template", "traditional"),
+            custom_resume_template=payload.get("custom_resume_template"),
+            custom_cover_letter_template=payload.get("custom_cover_letter_template"),
             notes=list(payload.get("notes", [])),
             attempts=payload.get("attempts", 0),
             last_error=payload.get("last_error"),

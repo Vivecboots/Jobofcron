@@ -47,6 +47,9 @@ class SearchResult:
     snippet: str
     source: str
     is_company_site: bool
+    description: Optional[str] = None
+    contact_email: Optional[str] = None
+    match_score: Optional[float] = None
 
 
 class GoogleJobSearch:
@@ -205,6 +208,7 @@ class CraigslistSearch:
                 snippet = re.sub(r"\s+", " ", html.unescape(snippet_raw)).strip()
 
             source = GoogleJobSearch._normalise_domain(link)
+            description, contact_email = self._fetch_listing_details(link)
             results.append(
                 SearchResult(
                     title=title,
@@ -212,6 +216,42 @@ class CraigslistSearch:
                     snippet=snippet,
                     source=source or "craigslist",
                     is_company_site=True,
+                    description=description or snippet,
+                    contact_email=contact_email,
                 )
             )
         return results
+
+    def _fetch_listing_details(self, link: str) -> tuple[Optional[str], Optional[str]]:
+        headers = {"User-Agent": "jobofcron-bot/0.1"}
+        try:
+            response = self.session.get(link, headers=headers, timeout=30)
+            response.raise_for_status()
+        except requests.RequestException:
+            return None, None
+
+        html_text = response.text
+        body_match = re.search(
+            r"<section[^>]+id=\"postingbody\"[^>]*>(?P<body>.*?)</section>",
+            html_text,
+            flags=re.IGNORECASE | re.DOTALL,
+        )
+        description = None
+        if body_match:
+            body = body_match.group("body")
+            body = re.sub(r"<script.*?</script>", "", body, flags=re.IGNORECASE | re.DOTALL)
+            body = re.sub(r"<style.*?</style>", "", body, flags=re.IGNORECASE | re.DOTALL)
+            body = re.sub(r"<.*?>", " ", body)
+            description = re.sub(r"\s+", " ", html.unescape(body)).strip()
+
+        email_match = re.search(r"mailto:([^\"?]+)", html_text, flags=re.IGNORECASE)
+        contact_email = None
+        if email_match:
+            contact_email = html.unescape(email_match.group(1))
+
+        if not contact_email:
+            data_email_match = re.search(r"data-email=\"([^\"]+)\"", html_text, flags=re.IGNORECASE)
+            if data_email_match:
+                contact_email = html.unescape(data_email_match.group(1))
+
+        return description, contact_email

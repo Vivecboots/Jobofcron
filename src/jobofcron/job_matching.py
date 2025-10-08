@@ -45,6 +45,7 @@ class JobPosting:
     tags: List[str] = field(default_factory=list)
     felon_friendly: Optional[bool] = None
     apply_url: Optional[str] = None
+    contact_email: Optional[str] = None
 
 
 @dataclass

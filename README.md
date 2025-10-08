@@ -5,8 +5,9 @@ Jobofcron is a roadmap for an automated job application assistant that tailors e
 ## System Overview
 - **User profile manager** – stores personal information, work history, skills, certifications, felony-friendly notes, and preferred industries. This evolves over time by asking the user for missing details.
 - **Job discovery engine** – searches Google (via SerpAPI) *and* Craigslist for job + location queries, prioritising company career pages so we can apply directly and avoid aggregator anti-bot hurdles.
+- **Direct email automation** – extracts Craigslist contact addresses, assembles application emails with attachments, and sends them via configurable SMTP credentials when form-based automation is not available.
 - **Evaluation & matching** – compares job descriptions with the stored talent/skills inventory to determine fit and to decide whether to request more info from the user.
-- **Resume & cover letter generator** – adapts resume sections and cover letters using the known profile plus any job-specific prompts from the user and saves reusable drafts for each opportunity. When an OpenAI API key is configured, the generator can switch to AI-authored Markdown drafts.
+- **Resume & cover letter generator** – adapts resume sections and cover letters using the known profile plus any job-specific prompts from the user and saves reusable drafts for each opportunity. Multiple built-in styles (traditional, modern, minimal) and custom template builders let you tailor the tone for each application. When an OpenAI API key is configured, the generator can switch to AI-authored Markdown drafts.
 - **Application scheduler & queue** – queues applications, spaces them out with configurable breaks, persists the backlog, and tracks submission history to avoid rate limits.
 - **Browser automation** – drives Playwright to fill in company career portals directly, supporting dry runs when you simply want to generate documents.
 - **Audit trail** – keeps a running ledger of applied jobs, outcomes, and newly discovered skills for future iterations.
@@ -50,6 +51,8 @@ python -m jobofcron.cli apply --queue-id "Customer Success Manager@Acme" --dry-r
 python -m jobofcron.cli worker --loop --interval 600 --documents-dir generated_documents
 python -m jobofcron.cli search --title "Customer Success Manager" --location "Austin, TX" --limit 5 --direct-only --sample-response samples/serpapi_demo_response.json --verbose
 python -m jobofcron.cli search --title "Automation Technician" --location "Portland" --provider craigslist --limit 10
+python -m jobofcron.cli search --title "Field Service" --location "Denver" --min-match-score 70 --output denver_field_service.json
+python -m jobofcron.cli batch-queue --results denver_field_service.json --start 2024-05-02T09:00 --interval-minutes 30 --resume-template modern --cover-template modern
 python -m jobofcron.cli record-outcome --queue-id "Customer Success Manager@Acme" --outcome interview --note "Intro call completed" --skills "Customer Success" "SaaS onboarding"
 ```
 
@@ -73,10 +76,20 @@ require an API key. Google results are tagged as ``DIRECT`` when the detected
 domain is not a known aggregator, helping you focus on company-owned application
 flows.
 
+Add ``--min-match-score`` to automatically suppress low-fit postings and
+``--output`` to write a JSON payload that can be fed into ``batch-queue`` for
+bulk scheduling. The batch command accepts ``--resume-template`` and
+``--cover-template`` (``traditional``, ``modern``, ``minimal``, ``custom``) plus
+``--resume-template-file``/``--cover-template-file`` for custom Markdown
+layouts.
+
 To let Jobofcron draft documents with OpenAI, install the ``ai`` optional
 dependency (``pip install --editable .[ai]``) and set ``OPENAI_API_KEY``. Use
 ``--use-ai``/``--ai-docs`` with the CLI or the Streamlit toggle in the Documents
-tab to switch between template-based drafts and AI-authored Markdown.
+tab to switch between template-based drafts and AI-authored Markdown. Template
+choices are also available via ``--resume-template``/``--cover-template`` on the
+CLI ``generate-docs`` and ``apply`` commands, with optional ``--contact-email``
+fields for email-first applications.
 
 ### Streamlit control centre
 
@@ -92,16 +105,24 @@ The app offers:
 
 - **Profile editor** – update contact details, salary expectations, and location
   preferences without touching JSON files.
+- **Dashboard overview** – glanceable metrics covering pending applications,
+  recorded outcomes, and the next scheduled submissions.
 - **Job search** – run SerpAPI-backed Google searches (or upload saved JSON
   responses) and Craigslist scrapes, focusing on company-owned application flows.
+  Filter results by match score, preview descriptions inline, capture Craigslist
+  contact emails, export CSV/JSON payloads, and batch-queue multiple postings in
+  one click.
 - **Job analysis** – paste descriptions, view visual match scores, capture
   follow-up questions, and queue promising postings for automation.
 - **Documents** – generate resumes and cover letters from templates or OpenAI,
   save them to disk, download previews, and queue applications in one step.
+  Built-in styles plus custom template builders keep the tone consistent across
+  applications.
 - **Skills dashboard** – review in-demand skills, add notes, and log interviews
   or offers to guide future tailoring.
 - **Application queue planner** – inspect pending submissions, reschedule,
-  record interviews/offers/declines, and export search results to CSV for offline sharing.
+  record interviews/offers/declines, see contact emails, and export search
+  results to CSV/JSON for offline sharing.
 
 ### Automation Extras
 
@@ -115,6 +136,11 @@ playwright install
 Use ``--dry-run`` with the ``apply`` and ``worker`` commands to generate
 documents without launching a browser session. Failed attempts are automatically
 rescheduled based on the configured retry delay.
+
+To enable Craigslist email submissions, configure SMTP credentials via the
+environment (``JOBOFCRON_SMTP_HOST``, ``JOBOFCRON_SMTP_PORT``,
+``JOBOFCRON_SMTP_USERNAME``, ``JOBOFCRON_SMTP_PASSWORD``, ``JOBOFCRON_SMTP_FROM``)
+or the corresponding CLI flags (``--email-host``/``--email-port``/etc.).
 
 ## Next Steps
 - Expand Playwright recipes for additional applicant tracking systems (Workday, iCIMS).
