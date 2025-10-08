@@ -1000,6 +1000,16 @@ def _render_documents_tab() -> None:
     )
 
 
+    use_ai_state_key = "documents_use_ai_enabled"
+    use_ai_default = st.session_state.get(use_ai_state_key, has_ai_env)
+    use_ai = st.checkbox(
+        "Use AI generator",
+        value=use_ai_default,
+        key=use_ai_state_key,
+        help="Requires the ai optional dependencies and an API key for the selected provider.",
+    )
+    use_ai = st.session_state.get(use_ai_state_key, use_ai_default)
+
     with st.form("documents_form"):
         title = st.text_input("Job title", value=selected.title if selected else "")
         company = st.text_input("Company", value="")
@@ -1013,12 +1023,6 @@ def _render_documents_tab() -> None:
             height=220,
         )
         tags_text = st.text_input("Tags", value="")
-        use_ai = st.checkbox(
-            "Use AI generator",
-
-            value=has_ai_env,
-            help="Requires the ai optional dependencies and an API key for the selected provider.",
-        )
         provider_index = provider_choices.index(default_provider)
         ai_provider = st.selectbox(
             "AI provider",
