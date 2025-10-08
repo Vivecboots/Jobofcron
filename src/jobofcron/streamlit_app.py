@@ -12,9 +12,12 @@ import json
 import os
 import sys
 from datetime import datetime, timedelta
-from io import StringIO
+from io import BytesIO, StringIO
 from pathlib import Path
 from typing import Iterable, List, Optional
+from uuid import uuid4
+from xml.etree import ElementTree
+from zipfile import ZipFile
 
 import streamlit as st
 
@@ -57,6 +60,7 @@ else:
     from .storage import Storage
 
 
+
 PROVIDER_DEFAULT_MODELS = {
     "openai": "gpt-4o-mini",
     "anthropic": "claude-3-sonnet-20240229",
@@ -80,24 +84,6 @@ def _env_value_for_provider(provider: str) -> str:
             return value
     return ""
 
-
-def _set_env_vars(env_names: Iterable[str], value: str) -> None:
-    for env_name in env_names:
-        if value:
-            os.environ[env_name] = value
-        else:
-            os.environ.pop(env_name, None)
-
-
-def _set_env_flag(env_name: str, enabled: bool) -> None:
-    if enabled:
-        os.environ[env_name] = "1"
-    else:
-        os.environ.pop(env_name, None)
-
-
-def _env_flag_value(env_name: str) -> bool:
-    return os.getenv(env_name, "").lower() in {"1", "true", "yes"}
 
 DEFAULT_STORAGE = Path(os.getenv("JOBOFCRON_STORAGE", "jobofcron_data.json"))
 
@@ -138,6 +124,53 @@ def _slugify(*parts: str) -> str:
     token = "-".join(part.strip().lower().replace(" ", "-") for part in parts if part)
     cleaned = [ch for ch in token if ch.isalnum() or ch in {"-", "_"}]
     return "".join(cleaned) or "document"
+
+
+def _extract_text_from_docx(data: bytes) -> str:
+    try:
+        with ZipFile(BytesIO(data)) as archive:
+            document_xml = archive.read("word/document.xml")
+    except KeyError as exc:
+        raise ValueError("The DOCX file is missing document.xml") from exc
+    except Exception as exc:  # pragma: no cover - defensive parsing
+        raise ValueError("Unable to read the DOCX file") from exc
+
+    try:
+        root = ElementTree.fromstring(document_xml)
+    except ElementTree.ParseError as exc:  # pragma: no cover - defensive parsing
+        raise ValueError("Unable to parse the DOCX contents") from exc
+
+    namespace = {"w": "http://schemas.openxmlformats.org/wordprocessingml/2006/main"}
+    paragraphs: List[str] = []
+    for paragraph in root.findall(".//w:p", namespace):
+        runs = [node.text or "" for node in paragraph.findall(".//w:t", namespace)]
+        if runs:
+            paragraphs.append("".join(runs))
+    return "\n".join(paragraphs).strip()
+
+
+def _read_uploaded_resume(upload) -> tuple[Optional[tuple[str, str]], Optional[str]]:
+    filename = getattr(upload, "name", "uploaded_resume")
+    suffix = Path(filename).suffix.lower()
+    data = upload.getvalue()
+
+    try:
+        if suffix in {".txt", ".md", ".markdown"}:
+            text = data.decode("utf-8", errors="ignore")
+        elif suffix == ".docx":
+            text = _extract_text_from_docx(data)
+        else:
+            return None, "Unsupported file type. Upload .txt, .md, or .docx resumes."
+    except UnicodeDecodeError:
+        return None, "Could not decode the file as UTF-8 text."
+    except ValueError as exc:
+        return None, str(exc)
+
+    text = text.strip()
+    if not text:
+        return None, "The uploaded file did not contain any readable text."
+
+    return (filename, text), None
 
 
 def _normalise_term(value: Optional[str]) -> str:
@@ -200,40 +233,8 @@ def _initialise_session_state() -> None:
         st.session_state.resume_template_choice = "traditional"
     if "cover_template_choice" not in st.session_state:
         st.session_state.cover_template_choice = "traditional"
-    serp_default = os.getenv("SERPAPI_KEY") or os.getenv("SERPAPI_API_KEY", "")
-    if "integration_serpapi_key" not in st.session_state:
-        st.session_state.integration_serpapi_key = serp_default
-    _set_env_vars(["SERPAPI_KEY", "SERPAPI_API_KEY"], st.session_state.integration_serpapi_key)
-    providers = AIDocumentGenerator.available_providers() or []
-    for provider in providers:
-        legacy_key = f"ai_api_key_{provider}"
-        new_key = f"integration_ai_key_{provider}"
-        if legacy_key in st.session_state and new_key not in st.session_state:
-            st.session_state[new_key] = st.session_state[legacy_key]
-        if new_key not in st.session_state:
-            st.session_state[new_key] = _env_value_for_provider(provider)
-        _set_env_vars(AIDocumentGenerator.provider_env_keys(provider), st.session_state[new_key])
-    smtp_defaults = {
-        "integration_smtp_host": os.getenv("JOBOFCRON_SMTP_HOST", ""),
-        "integration_smtp_port": os.getenv("JOBOFCRON_SMTP_PORT", ""),
-        "integration_smtp_username": os.getenv("JOBOFCRON_SMTP_USERNAME", ""),
-        "integration_smtp_password": os.getenv("JOBOFCRON_SMTP_PASSWORD", ""),
-        "integration_smtp_from": os.getenv("JOBOFCRON_SMTP_FROM", ""),
-    }
-    smtp_flags = {
-        "integration_smtp_use_ssl": _env_flag_value("JOBOFCRON_SMTP_USE_SSL"),
-        "integration_smtp_disable_tls": _env_flag_value("JOBOFCRON_SMTP_DISABLE_TLS"),
-    }
-    for key, value in smtp_defaults.items():
-        if key not in st.session_state:
-            st.session_state[key] = value
-        env_name = "JOBOFCRON_" + key.split("integration_")[-1].upper()
-        _set_env_vars([env_name], st.session_state[key])
-    for key, value in smtp_flags.items():
-        if key not in st.session_state:
-            st.session_state[key] = value
-        env_name = "JOBOFCRON_" + key.split("integration_")[-1].upper()
-        _set_env_flag(env_name, st.session_state[key])
+    if "documents_reference_resumes" not in st.session_state:
+        st.session_state.documents_reference_resumes = []
 
 
 def _reload_state_if_needed(path_text: str) -> None:
@@ -601,14 +602,14 @@ def _render_search_tab() -> None:
             value=" ".join(profile.job_preferences.focus_domains),
             help="Optional additional keywords (e.g. industry, company).",
         )
-        serpapi_key = st.session_state.get("integration_serpapi_key", "")
+        serpapi_key = ""
         sample_response: Optional[dict] = None
         craigslist_site = None
         uploaded_file = None
         if provider == "google":
             serpapi_key = st.text_input(
                 "SerpAPI key",
-                value=serpapi_key,
+                value=os.getenv("SERPAPI_KEY", ""),
                 type="password",
                 help="Provide an API key for live Google searches or upload a saved response below.",
             )
@@ -637,8 +638,6 @@ def _render_search_tab() -> None:
             elif not serpapi_key.strip():
                 st.error("Provide either a SerpAPI key or a sample response.")
                 return
-            st.session_state.integration_serpapi_key = serpapi_key.strip()
-            _set_env_vars(["SERPAPI_KEY", "SERPAPI_API_KEY"], st.session_state.integration_serpapi_key)
 
         try:
             results = _run_search(
@@ -1040,6 +1039,81 @@ def _render_documents_tab() -> None:
     if selection != "Manual entry":
         selected = results[options.index(selection) - 1]
 
+    reference_state_key = "documents_reference_resumes"
+    reference_entries: List[dict] = st.session_state.get(reference_state_key, [])
+
+    st.markdown("### Reference resumes")
+    st.caption(
+        "Upload previous resumes so the AI generator can mine your achievements and phrasing for new drafts."
+    )
+    uploads = st.file_uploader(
+        "Add resume files",
+        type=["txt", "md", "markdown", "docx"],
+        accept_multiple_files=True,
+    )
+    if uploads:
+        for upload in uploads:
+            parsed, error = _read_uploaded_resume(upload)
+            if error:
+                st.warning(f"{upload.name}: {error}")
+                continue
+            if not parsed:
+                continue
+            name, text = parsed
+            existing = next((entry for entry in reference_entries if entry.get("name") == name), None)
+            if existing:
+                existing["content"] = text
+                existing["uploaded_at"] = datetime.now().isoformat(timespec="seconds")
+            else:
+                reference_entries.append(
+                    {
+                        "id": str(uuid4()),
+                        "name": name,
+                        "content": text,
+                        "uploaded_at": datetime.now().isoformat(timespec="seconds"),
+                    }
+                )
+        st.session_state[reference_state_key] = reference_entries
+
+    if reference_entries:
+        for entry in list(reference_entries):
+            label = entry.get("name", "Resume")
+            preview_length = len(entry.get("content", ""))
+            display_label = f"{label} ({preview_length} chars)"
+            with st.expander(display_label, expanded=False):
+                label_key = f"resume_label_{entry['id']}"
+                content_key = f"resume_content_{entry['id']}"
+                updated_label = st.text_input("Label", value=label, key=label_key).strip() or label
+                if updated_label != entry.get("name"):
+                    entry["name"] = updated_label
+                updated_content = st.text_area(
+                    "Editable text",
+                    value=entry.get("content", ""),
+                    height=220,
+                    key=content_key,
+                )
+                if updated_content != entry.get("content"):
+                    entry["content"] = updated_content
+                st.caption(f"Last added {entry.get('uploaded_at', 'recently')}")
+                if st.button("Remove", key=f"remove_resume_{entry['id']}"):
+                    st.session_state[reference_state_key] = [
+                        item for item in reference_entries if item["id"] != entry["id"]
+                    ]
+                    st.experimental_rerun()
+        st.session_state[reference_state_key] = reference_entries
+    else:
+        st.info("No reference resumes uploaded yet. Add .txt, .md, or .docx files above.")
+
+    reference_entries = st.session_state.get(reference_state_key, [])
+    reference_materials = [
+        (
+            entry.get("name") or f"Resume {idx + 1}",
+            entry.get("content", ""),
+        )
+        for idx, entry in enumerate(reference_entries)
+        if entry.get("content", "").strip()
+    ]
+
     provider_choices = AIDocumentGenerator.available_providers() or ["openai"]
     prompt_styles = AIDocumentGenerator.available_prompt_styles() or ["general"]
     default_provider = _detect_default_ai_provider()
@@ -1050,6 +1124,121 @@ def _render_documents_tab() -> None:
         for provider in provider_choices
         for env_var in AIDocumentGenerator.provider_env_keys(provider)
     )
+
+
+    use_ai_state_key = "documents_use_ai_enabled"
+
+    if use_ai_state_key not in st.session_state:
+        st.session_state[use_ai_state_key] = has_ai_env
+    use_ai = st.checkbox(
+        "Use AI generator",
+        value=st.session_state[use_ai_state_key],
+        key=use_ai_state_key,
+        help="Requires the ai optional dependencies and an API key for the selected provider.",
+    )
+
+    def _ensure_ai_model_session(provider: str) -> str:
+        key = f"ai_model_{provider}"
+        if key not in st.session_state:
+            st.session_state[key] = PROVIDER_DEFAULT_MODELS.get(provider, "gpt-4o-mini")
+        return key
+
+    def _ensure_ai_api_key_session(provider: str) -> str:
+        key = f"ai_api_key_{provider}"
+        if key not in st.session_state:
+            st.session_state[key] = _env_value_for_provider(provider)
+        return key
+
+    def _bind_text_input(label: str, *, state_key: str, help_text: Optional[str] = None, password: bool = False) -> str:
+        widget_key = f"{state_key}_widget"
+        default_value = st.session_state.get(state_key, "")
+        kwargs = {"help": help_text} if help_text else {}
+        if password:
+            kwargs["type"] = "password"
+        value = st.text_input(label, value=default_value, key=widget_key, **kwargs)
+        st.session_state[state_key] = value
+        return value
+
+    ai_provider_state_key = "documents_ai_provider"
+    if (
+        ai_provider_state_key not in st.session_state
+        or st.session_state[ai_provider_state_key] not in provider_choices
+    ):
+        st.session_state[ai_provider_state_key] = default_provider
+
+    prompt_style_state_key = "documents_ai_prompt_style"
+    default_prompt_style = "general" if "general" in prompt_styles else prompt_styles[0]
+    if (
+        prompt_style_state_key not in st.session_state
+        or st.session_state[prompt_style_state_key] not in prompt_styles
+    ):
+        st.session_state[prompt_style_state_key] = default_prompt_style
+
+    temperature_state_key = "documents_ai_temperature"
+    if temperature_state_key not in st.session_state:
+        st.session_state[temperature_state_key] = 0.3
+
+    if use_ai:
+        st.markdown("### AI configuration")
+        st.selectbox(
+
+            "AI provider",
+            provider_choices,
+            key=ai_provider_state_key,
+            help="Select the provider to use for automated document drafting.",
+        )
+        ai_provider = st.session_state[ai_provider_state_key]
+        model_key = _ensure_ai_model_session(ai_provider)
+        key_key = _ensure_ai_api_key_session(ai_provider)
+        st.selectbox(
+            "AI prompt focus",
+            prompt_styles,
+            key=prompt_style_state_key,
+            help="Tailor output for technical, sales, customer success, leadership, and other role families.",
+        )
+        model_default = PROVIDER_DEFAULT_MODELS.get(ai_provider, "gpt-4o-mini")
+
+        _bind_text_input(
+            "AI model",
+            state_key=model_key,
+            help_text=f"Suggested default: {model_default}",
+
+        )
+        st.slider(
+            "AI creativity",
+            min_value=0.0,
+            max_value=1.0,
+            step=0.05,
+            key=temperature_state_key,
+        )
+
+        _bind_text_input(
+            "AI API key",
+            state_key=key_key,
+            password=True,
+
+        )
+    else:
+        ai_provider = st.session_state[ai_provider_state_key]
+        model_key = _ensure_ai_model_session(ai_provider)
+        key_key = _ensure_ai_api_key_session(ai_provider)
+        st.caption(
+            "Enable the AI generator above to configure the provider, prompt focus, model, creativity, and API key.",
+        )
+
+
+    ai_provider = st.session_state[ai_provider_state_key]
+    model_key = _ensure_ai_model_session(ai_provider)
+    key_key = _ensure_ai_api_key_session(ai_provider)
+    ai_style = st.session_state[prompt_style_state_key]
+    ai_model = st.session_state[model_key]
+    ai_temperature = float(st.session_state[temperature_state_key])
+    ai_key = st.session_state[key_key]
+
+    if reference_materials and not use_ai:
+        st.caption(
+            "Reference resumes are stored for when you enable the AI generator above."
+        )
 
     with st.form("documents_form"):
         title = st.text_input("Job title", value=selected.title if selected else "")
@@ -1063,52 +1252,8 @@ def _render_documents_tab() -> None:
             value=selected.snippet if selected else "",
             height=220,
         )
+
         tags_text = st.text_input("Tags", value="")
-        use_ai = st.checkbox(
-            "Use AI generator",
-            value=has_ai_env,
-            help="Requires the ai optional dependencies and an API key for the selected provider.",
-        )
-        provider_index = provider_choices.index(default_provider)
-        ai_provider = st.selectbox(
-            "AI provider",
-            provider_choices,
-            index=provider_index,
-            disabled=not use_ai,
-        )
-        prompt_index = prompt_styles.index("general") if "general" in prompt_styles else 0
-        ai_style = st.selectbox(
-            "AI prompt focus",
-            prompt_styles,
-            index=prompt_index,
-            disabled=not use_ai,
-            help="Tailor output for technical, sales, customer success, leadership, and other role families.",
-        )
-        model_key = f"ai_model_{ai_provider}"
-        model_default = PROVIDER_DEFAULT_MODELS.get(ai_provider, "gpt-4o-mini")
-        ai_model = st.text_input(
-            "AI model",
-            value=st.session_state.get(model_key, model_default),
-            disabled=not use_ai,
-            key=model_key,
-            help=f"Suggested default: {model_default}",
-        )
-        ai_temperature = st.slider(
-            "AI creativity",
-            min_value=0.0,
-            max_value=1.0,
-            value=0.3,
-            step=0.05,
-            disabled=not use_ai,
-        )
-        key_key = f"integration_ai_key_{ai_provider}"
-        ai_key_default = st.session_state.get(key_key, _env_value_for_provider(ai_provider))
-        ai_key = st.text_input(
-            "AI API key",
-            value=ai_key_default,
-            type="password",
-            disabled=not use_ai,
-        )
         output_dir = st.text_input("Output directory", value="generated_documents")
         enqueue = st.checkbox("Add to queue", value=False)
         schedule_time = datetime.now()
@@ -1169,10 +1314,6 @@ def _render_documents_tab() -> None:
     if not submitted:
         return
 
-    ai_key_value = ai_key.strip()
-    st.session_state[key_key] = ai_key_value
-    _set_env_vars(AIDocumentGenerator.provider_env_keys(ai_provider), ai_key_value)
-
     if not title.strip() or not company.strip():
         st.error("Provide both a job title and company name.")
         return
@@ -1201,20 +1342,32 @@ def _render_documents_tab() -> None:
     cover_text: str
     if use_ai:
         try:
+
             model_name = (ai_model or "").strip() or PROVIDER_DEFAULT_MODELS.get(ai_provider, "gpt-4o-mini")
             generator = AIDocumentGenerator(
-                api_key=ai_key_value or None,
+                api_key=ai_key or None,
                 model=model_name,
                 temperature=ai_temperature,
                 provider=ai_provider,
                 prompt_style=ai_style,
             )
+
         except DocumentGenerationDependencyError as exc:
             st.error(str(exc))
             return
         try:
-            resume_text = generator.generate_resume(profile, posting, assessment)
-            cover_text = generator.generate_cover_letter(profile, posting, assessment)
+            resume_text = generator.generate_resume(
+                profile,
+                posting,
+                assessment,
+                reference_materials=reference_materials,
+            )
+            cover_text = generator.generate_cover_letter(
+                profile,
+                posting,
+                assessment,
+                reference_materials=reference_materials,
+            )
         except DocumentGenerationError as exc:
             st.error(str(exc))
             return
@@ -1261,9 +1414,11 @@ def _render_documents_tab() -> None:
             custom_cover_letter_template=cover_custom_text if cover_choice == "custom" else None,
         )
         if use_ai and generator:
+
             queued.notes.append(
                 f"Documents generated with {ai_provider} ({generator.model}, style={ai_style})."
             )
+
         queue.add(queued)
         st.success(f"Queued {queued.job_id} for {schedule_time.isoformat(timespec='minutes')}.")
 
@@ -1400,84 +1555,6 @@ def main() -> None:
     if storage_path != st.session_state.storage_path:
         st.session_state.storage_path = storage_path
     _reload_state_if_needed(storage_path)
-
-    st.sidebar.markdown("### Integrations")
-    serpapi_sidebar = st.sidebar.text_input(
-        "SerpAPI key",
-        value=st.session_state.integration_serpapi_key,
-        type="password",
-        help="Used for Google job searches when no sample response is provided.",
-    )
-    serpapi_trimmed = serpapi_sidebar.strip()
-    if serpapi_trimmed != st.session_state.integration_serpapi_key:
-        st.session_state.integration_serpapi_key = serpapi_trimmed
-    _set_env_vars(["SERPAPI_KEY", "SERPAPI_API_KEY"], st.session_state.integration_serpapi_key)
-
-    providers = AIDocumentGenerator.available_providers() or []
-    if providers:
-        st.sidebar.markdown("#### AI providers")
-    for provider in providers:
-        key_name = f"integration_ai_key_{provider}"
-        label = f"{provider.capitalize()} API key"
-        ai_sidebar = st.sidebar.text_input(
-            label,
-            value=st.session_state.get(key_name, ""),
-            type="password",
-            help="Stored in session only; required for AI resume and cover letter generation.",
-        )
-        ai_trimmed = ai_sidebar.strip()
-        if ai_trimmed != st.session_state.get(key_name, ""):
-            st.session_state[key_name] = ai_trimmed
-        _set_env_vars(AIDocumentGenerator.provider_env_keys(provider), st.session_state.get(key_name, ""))
-
-    st.sidebar.markdown("#### Email (SMTP)")
-    smtp_host = st.sidebar.text_input(
-        "SMTP host",
-        value=st.session_state.integration_smtp_host,
-        help="Mail server used for Craigslist email applications.",
-    )
-    smtp_port = st.sidebar.text_input("SMTP port", value=st.session_state.integration_smtp_port)
-    smtp_username = st.sidebar.text_input("SMTP username", value=st.session_state.integration_smtp_username)
-    smtp_password = st.sidebar.text_input(
-        "SMTP password",
-        value=st.session_state.integration_smtp_password,
-        type="password",
-    )
-    smtp_from = st.sidebar.text_input(
-        "From email",
-        value=st.session_state.integration_smtp_from,
-        help="Address that will appear as the sender for email applications.",
-    )
-    smtp_use_ssl = st.sidebar.checkbox(
-        "Use SSL",
-        value=st.session_state.integration_smtp_use_ssl,
-        help="Enable for servers that require SMTPS on port 465.",
-    )
-    smtp_disable_tls = st.sidebar.checkbox(
-        "Disable STARTTLS",
-        value=st.session_state.integration_smtp_disable_tls,
-        help="Check if your server does not support STARTTLS upgrades.",
-    )
-
-    for key, value in {
-        "integration_smtp_host": smtp_host.strip(),
-        "integration_smtp_port": smtp_port.strip(),
-        "integration_smtp_username": smtp_username.strip(),
-        "integration_smtp_password": smtp_password.strip(),
-        "integration_smtp_from": smtp_from.strip(),
-    }.items():
-        if value != st.session_state.get(key, ""):
-            st.session_state[key] = value
-        env_name = "JOBOFCRON_" + key.split("integration_")[-1].upper()
-        _set_env_vars([env_name], st.session_state.get(key, ""))
-
-    if smtp_use_ssl != st.session_state.integration_smtp_use_ssl:
-        st.session_state.integration_smtp_use_ssl = smtp_use_ssl
-    _set_env_flag("JOBOFCRON_SMTP_USE_SSL", st.session_state.integration_smtp_use_ssl)
-
-    if smtp_disable_tls != st.session_state.integration_smtp_disable_tls:
-        st.session_state.integration_smtp_disable_tls = smtp_disable_tls
-    _set_env_flag("JOBOFCRON_SMTP_DISABLE_TLS", st.session_state.integration_smtp_disable_tls)
 
     st.title("Jobofcron Control Centre")
     st.caption("Plan direct applications, tailor documents, and track job hunt progress.")
