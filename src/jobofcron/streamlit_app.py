@@ -1127,15 +1127,15 @@ def _render_documents_tab() -> None:
 
 
     use_ai_state_key = "documents_use_ai_enabled"
-    use_ai_default = st.session_state.get(use_ai_state_key, has_ai_env)
+
+    if use_ai_state_key not in st.session_state:
+        st.session_state[use_ai_state_key] = has_ai_env
     use_ai = st.checkbox(
         "Use AI generator",
-        value=use_ai_default,
+        value=st.session_state[use_ai_state_key],
         key=use_ai_state_key,
         help="Requires the ai optional dependencies and an API key for the selected provider.",
     )
-    use_ai = st.session_state.get(use_ai_state_key, use_ai_default)
-
 
     def _ensure_ai_model_session(provider: str) -> str:
         key = f"ai_model_{provider}"
@@ -1149,13 +1149,22 @@ def _render_documents_tab() -> None:
             st.session_state[key] = _env_value_for_provider(provider)
         return key
 
+    def _bind_text_input(label: str, *, state_key: str, help_text: Optional[str] = None, password: bool = False) -> str:
+        widget_key = f"{state_key}_widget"
+        default_value = st.session_state.get(state_key, "")
+        kwargs = {"help": help_text} if help_text else {}
+        if password:
+            kwargs["type"] = "password"
+        value = st.text_input(label, value=default_value, key=widget_key, **kwargs)
+        st.session_state[state_key] = value
+        return value
+
     ai_provider_state_key = "documents_ai_provider"
     if (
         ai_provider_state_key not in st.session_state
         or st.session_state[ai_provider_state_key] not in provider_choices
     ):
         st.session_state[ai_provider_state_key] = default_provider
-
 
     prompt_style_state_key = "documents_ai_prompt_style"
     default_prompt_style = "general" if "general" in prompt_styles else prompt_styles[0]
@@ -1188,10 +1197,12 @@ def _render_documents_tab() -> None:
             help="Tailor output for technical, sales, customer success, leadership, and other role families.",
         )
         model_default = PROVIDER_DEFAULT_MODELS.get(ai_provider, "gpt-4o-mini")
-        st.text_input(
+
+        _bind_text_input(
             "AI model",
-            key=model_key,
-            help=f"Suggested default: {model_default}",
+            state_key=model_key,
+            help_text=f"Suggested default: {model_default}",
+
         )
         st.slider(
             "AI creativity",
@@ -1200,10 +1211,12 @@ def _render_documents_tab() -> None:
             step=0.05,
             key=temperature_state_key,
         )
-        st.text_input(
+
+        _bind_text_input(
             "AI API key",
-            type="password",
-            key=key_key,
+            state_key=key_key,
+            password=True,
+
         )
     else:
         ai_provider = st.session_state[ai_provider_state_key]
@@ -1212,6 +1225,7 @@ def _render_documents_tab() -> None:
         st.caption(
             "Enable the AI generator above to configure the provider, prompt focus, model, creativity, and API key.",
         )
+
 
     ai_provider = st.session_state[ai_provider_state_key]
     model_key = _ensure_ai_model_session(ai_provider)
@@ -1226,7 +1240,6 @@ def _render_documents_tab() -> None:
             "Reference resumes are stored for when you enable the AI generator above."
         )
 
-
     with st.form("documents_form"):
         title = st.text_input("Job title", value=selected.title if selected else "")
         company = st.text_input("Company", value="")
@@ -1239,6 +1252,7 @@ def _render_documents_tab() -> None:
             value=selected.snippet if selected else "",
             height=220,
         )
+
         tags_text = st.text_input("Tags", value="")
         output_dir = st.text_input("Output directory", value="generated_documents")
         enqueue = st.checkbox("Add to queue", value=False)
