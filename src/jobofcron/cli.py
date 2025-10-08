@@ -10,9 +10,15 @@ from typing import List, Optional
 
 from .application_automation import AutomationDependencyError, DirectApplyAutomation
 from .application_queue import ApplicationQueue, QueuedApplication
-from .document_generation import generate_cover_letter, generate_resume
+from .document_generation import (
+    AIDocumentGenerator,
+    DocumentGenerationDependencyError,
+    DocumentGenerationError,
+    generate_cover_letter,
+    generate_resume,
+)
 from .job_matching import JobPosting, analyse_job_fit
-from .job_search import GoogleJobSearch
+from .job_search import CraigslistSearch, GoogleJobSearch
 from .profile import CandidateProfile
 from .scheduler import plan_schedule
 from .skills_inventory import SkillsInventory
@@ -57,6 +63,15 @@ def save_and_exit(
     storage: Storage,
 ) -> None:
     storage.save(profile, inventory, queue)
+
+
+def _build_ai_generator(
+    *, api_key: Optional[str], model: str, temperature: float
+) -> AIDocumentGenerator:
+    try:
+        return AIDocumentGenerator(api_key=api_key, model=model, temperature=temperature)
+    except DocumentGenerationDependencyError as exc:
+        raise SystemExit(str(exc)) from exc
 
 
 def cmd_show_profile(args: argparse.Namespace) -> None:
@@ -237,8 +252,26 @@ def cmd_generate_documents(args: argparse.Namespace) -> None:
     resume_path = output_dir / f"{slug}_resume.md"
     cover_path = output_dir / f"{slug}_cover_letter.md"
 
-    resume_path.write_text(generate_resume(profile, posting, assessment), encoding="utf-8")
-    cover_path.write_text(generate_cover_letter(profile, posting, assessment), encoding="utf-8")
+    resume_text: str
+    cover_text: str
+
+    if args.use_ai:
+        generator = _build_ai_generator(
+            api_key=args.ai_api_key,
+            model=args.ai_model,
+            temperature=args.ai_temperature,
+        )
+        try:
+            resume_text = generator.generate_resume(profile, posting, assessment)
+            cover_text = generator.generate_cover_letter(profile, posting, assessment)
+        except DocumentGenerationError as exc:
+            raise SystemExit(str(exc))
+    else:
+        resume_text = generate_resume(profile, posting, assessment)
+        cover_text = generate_cover_letter(profile, posting, assessment)
+
+    resume_path.write_text(resume_text, encoding="utf-8")
+    cover_path.write_text(cover_text, encoding="utf-8")
 
     print(f"Resume saved to {resume_path}")
     print(f"Cover letter saved to {cover_path}")
@@ -253,6 +286,8 @@ def cmd_generate_documents(args: argparse.Namespace) -> None:
             resume_path=str(resume_path),
             cover_letter_path=str(cover_path),
         )
+        if args.use_ai:
+            task.notes.append(f"Documents generated with AI model {args.ai_model}.")
         queue.add(task)
         print(f"Queued application {task.job_id} for {apply_at.isoformat(timespec='minutes')}")
 
@@ -308,8 +343,22 @@ def cmd_apply(args: argparse.Namespace) -> None:
             slug = slugify(args.job_id or posting.id or posting.title, posting.company)
             resume_path = output_dir / f"{slug}_resume.md"
             cover_path = output_dir / f"{slug}_cover_letter.md"
-            resume_path.write_text(generate_resume(profile, posting, assessment), encoding="utf-8")
-            cover_path.write_text(generate_cover_letter(profile, posting, assessment), encoding="utf-8")
+            if args.ai_docs:
+                generator = _build_ai_generator(
+                    api_key=args.ai_api_key,
+                    model=args.ai_model,
+                    temperature=args.ai_temperature,
+                )
+                try:
+                    resume_text = generator.generate_resume(profile, posting, assessment)
+                    cover_text = generator.generate_cover_letter(profile, posting, assessment)
+                except DocumentGenerationError as exc:
+                    raise SystemExit(str(exc))
+            else:
+                resume_text = generate_resume(profile, posting, assessment)
+                cover_text = generate_cover_letter(profile, posting, assessment)
+            resume_path.write_text(resume_text, encoding="utf-8")
+            cover_path.write_text(cover_text, encoding="utf-8")
             print(f"Generated resume at {resume_path}")
             print(f"Generated cover letter at {cover_path}")
 
@@ -351,15 +400,44 @@ def cmd_apply(args: argparse.Namespace) -> None:
         save_and_exit(profile, inventory, queue, storage)
 
 
+def cmd_record_outcome(args: argparse.Namespace) -> None:
+    profile, inventory, queue, storage = load_or_init(Path(args.storage))
+    job_id = args.queue_id
+    task = queue.get(job_id)
+    if not task:
+        raise SystemExit(f"No queued application found with id {job_id}")
+
+    task.record_outcome(args.outcome, note=args.note)
+
+    target_skills: List[str] = args.skills or list(task.posting.tags or [])
+    if args.outcome.lower() == "interview":
+        for skill in target_skills:
+            inventory.record_interview(skill)
+    elif args.outcome.lower() == "offer":
+        for skill in target_skills:
+            inventory.record_offer(skill)
+
+    save_and_exit(profile, inventory, queue, storage)
+    print(f"Recorded outcome '{args.outcome}' for {job_id}.")
+
+
 def cmd_worker(args: argparse.Namespace) -> None:
     documents_dir = Path(args.documents_dir)
     documents_dir.mkdir(parents=True, exist_ok=True)
+    ai_generator: Optional[AIDocumentGenerator] = None
+    if args.ai_docs:
+        ai_generator = _build_ai_generator(
+            api_key=args.ai_api_key,
+            model=args.ai_model,
+            temperature=args.ai_temperature,
+        )
     worker = JobAutomationWorker(
         Path(args.storage),
         documents_dir=documents_dir,
         headless=not args.no_headless,
         timeout=args.timeout,
         retry_delay=timedelta(minutes=args.retry_minutes),
+        ai_generator=ai_generator,
     )
 
     if args.loop:
@@ -379,34 +457,52 @@ def cmd_search(args: argparse.Namespace) -> None:
     if not location:
         raise SystemExit("Provide --location or save a default location via prefs.")
 
+    if args.provider != "google" and args.sample_response:
+        raise SystemExit("--sample-response is only supported with the Google provider.")
+
     results = []
 
-    if args.sample_response:
-        payload = json.loads(Path(args.sample_response).read_text(encoding="utf-8"))
-        results = GoogleJobSearch.parse_results(payload)
+    if args.provider == "google":
+        if args.sample_response:
+            payload = json.loads(Path(args.sample_response).read_text(encoding="utf-8"))
+            results = GoogleJobSearch.parse_results(payload)
+        else:
+            api_key = args.serpapi_key or os.getenv("SERPAPI_KEY") or os.getenv("SERPAPI_API_KEY")
+            if not api_key:
+                raise SystemExit("Set SERPAPI_KEY or pass --serpapi-key to run live searches.")
+            searcher = GoogleJobSearch(api_key=api_key, engine=args.engine)
+            results = searcher.search_jobs(
+                title=args.title,
+                location=location,
+                max_results=args.limit,
+                remote=args.remote,
+                extra_terms=args.extra or None,
+            )
+
+        if args.direct_only:
+            results = GoogleJobSearch.filter_direct_apply(results)
     else:
-        api_key = args.serpapi_key or os.getenv("SERPAPI_KEY") or os.getenv("SERPAPI_API_KEY")
-        if not api_key:
-            raise SystemExit("Set SERPAPI_KEY or pass --serpapi-key to run live searches.")
-        searcher = GoogleJobSearch(api_key=api_key, engine=args.engine)
+        searcher = CraigslistSearch(
+            location=location,
+            site_hint=args.craigslist_site,
+        )
         results = searcher.search_jobs(
             title=args.title,
-            location=location,
             max_results=args.limit,
             remote=args.remote,
             extra_terms=args.extra or None,
         )
 
-    if args.direct_only:
-        results = GoogleJobSearch.filter_direct_apply(results)
-
     if not results:
         print("No search results found.")
         return
 
-    print(f"Top {len(results)} results for '{args.title}' near {location}:")
+    print(f"Top {len(results)} results for '{args.title}' near {location} ({args.provider}):")
     for idx, result in enumerate(results, start=1):
-        badge = "DIRECT" if result.is_company_site else "AGGREGATOR"
+        if args.provider == "google":
+            badge = "DIRECT" if result.is_company_site else "AGGREGATOR"
+        else:
+            badge = "DIRECT"
         print(f"{idx:>2}. [{badge}] {result.title}")
         print(f"    Source: {result.source}")
         print(f"    Link:   {result.link}")
@@ -483,6 +579,10 @@ def build_parser() -> argparse.ArgumentParser:
         "--apply-at",
         help="ISO 8601 timestamp for when the worker should submit the queued application",
     )
+    documents.add_argument("--use-ai", action="store_true", help="Use the AI generator instead of templates")
+    documents.add_argument("--ai-model", default="gpt-4o-mini")
+    documents.add_argument("--ai-api-key")
+    documents.add_argument("--ai-temperature", type=float, default=0.3)
     documents.set_defaults(func=cmd_generate_documents)
 
     apply_cmd = subparsers.add_parser("apply", help="Submit an application immediately")
@@ -502,6 +602,10 @@ def build_parser() -> argparse.ArgumentParser:
     apply_cmd.add_argument("--resume")
     apply_cmd.add_argument("--cover-letter")
     apply_cmd.add_argument("--auto-documents", action="store_true")
+    apply_cmd.add_argument("--ai-docs", action="store_true", help="Use the AI generator when auto-creating documents")
+    apply_cmd.add_argument("--ai-model", default="gpt-4o-mini")
+    apply_cmd.add_argument("--ai-api-key")
+    apply_cmd.add_argument("--ai-temperature", type=float, default=0.3)
     apply_cmd.add_argument("--output-dir", default="generated_documents")
     apply_cmd.add_argument("--no-headless", action="store_true")
     apply_cmd.add_argument("--timeout", type=int, default=90)
@@ -511,15 +615,16 @@ def build_parser() -> argparse.ArgumentParser:
 
     search = subparsers.add_parser(
         "search",
-        help="Search Google (via SerpAPI) for jobs and highlight direct-apply links",
+        help="Discover roles via Google (SerpAPI) or Craigslist",
     )
     search.add_argument("--title", required=True, help="Job title or keywords to search for")
     search.add_argument("--location", help="Location to focus on; defaults to saved prefs")
     search.add_argument("--remote", action="store_true", help="Hint the search to favour remote roles")
     search.add_argument("--limit", type=int, default=10, help="Maximum number of search results to show")
     search.add_argument("--extra", nargs="*", help="Additional search terms to append")
-    search.add_argument("--direct-only", action="store_true", help="Only show company-owned domains")
-    search.add_argument("--serpapi-key", help="Override the SERPAPI_KEY environment variable")
+    search.add_argument("--provider", choices=["google", "craigslist"], default="google")
+    search.add_argument("--direct-only", action="store_true", help="Only show company-owned domains (Google only)")
+    search.add_argument("--serpapi-key", help="Override the SERPAPI_KEY environment variable (Google only)")
     search.add_argument(
         "--engine",
         default="google",
@@ -529,8 +634,26 @@ def build_parser() -> argparse.ArgumentParser:
         "--sample-response",
         help="Load a saved SerpAPI response JSON file instead of making a live request",
     )
+    search.add_argument(
+        "--craigslist-site",
+        help="Craigslist site slug or hostname (e.g. 'austin' or 'sfbay.craigslist.org')",
+    )
     search.add_argument("--verbose", action="store_true", help="Print search result snippets")
     search.set_defaults(func=cmd_search)
+
+    record = subparsers.add_parser(
+        "record-outcome",
+        help="Log interviews/offers for queued applications and update skill stats",
+    )
+    record.add_argument("--queue-id", required=True)
+    record.add_argument(
+        "--outcome",
+        required=True,
+        choices=["applied", "interview", "offer", "rejected", "ghosted"],
+    )
+    record.add_argument("--skills", nargs="*", help="Override which skills should be credited")
+    record.add_argument("--note", help="Optional note to attach to the queue entry")
+    record.set_defaults(func=cmd_record_outcome)
 
     worker = subparsers.add_parser("worker", help="Process queued applications on a schedule")
     worker.add_argument("--documents-dir", default="generated_documents")
@@ -540,6 +663,10 @@ def build_parser() -> argparse.ArgumentParser:
     worker.add_argument("--no-headless", action="store_true", help="Run the browser with a visible window")
     worker.add_argument("--timeout", type=int, default=90, help="Playwright navigation timeout in seconds")
     worker.add_argument("--retry-minutes", type=int, default=45, help="Minutes to wait before retrying failures")
+    worker.add_argument("--ai-docs", action="store_true", help="Use the AI generator when refreshing documents")
+    worker.add_argument("--ai-model", default="gpt-4o-mini")
+    worker.add_argument("--ai-api-key")
+    worker.add_argument("--ai-temperature", type=float, default=0.3)
     worker.set_defaults(func=cmd_worker)
 
     return parser

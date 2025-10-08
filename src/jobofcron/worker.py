@@ -8,7 +8,12 @@ from typing import Optional
 
 from .application_automation import AutomationDependencyError, DirectApplyAutomation
 from .application_queue import ApplicationQueue, QueuedApplication
-from .document_generation import generate_cover_letter, generate_resume
+from .document_generation import (
+    AIDocumentGenerator,
+    DocumentGenerationError,
+    generate_cover_letter,
+    generate_resume,
+)
 from .job_matching import MatchAssessment, analyse_job_fit
 from .profile import CandidateProfile
 from .skills_inventory import SkillsInventory
@@ -31,12 +36,14 @@ class JobAutomationWorker:
         headless: bool = True,
         timeout: int = 90,
         retry_delay: timedelta = timedelta(minutes=45),
+        ai_generator: Optional[AIDocumentGenerator] = None,
     ) -> None:
         self.storage = Storage(storage_path)
         self.documents_dir = documents_dir or Path("generated_documents")
         self.documents_dir.mkdir(parents=True, exist_ok=True)
         self.retry_delay = retry_delay
         self.automation = DirectApplyAutomation(headless=headless, timeout=timeout)
+        self.ai_generator = ai_generator
 
     def run_once(self, *, dry_run: bool = False) -> None:
         profile, inventory, queue = self._load_state()
@@ -104,11 +111,25 @@ class JobAutomationWorker:
             else self.documents_dir / f"{slug}_cover_letter.md"
         )
 
-        resume_text = generate_resume(profile, task.posting, assessment)
+        if self.ai_generator is not None:
+            try:
+                resume_text = self.ai_generator.generate_resume(profile, task.posting, assessment)
+            except DocumentGenerationError as exc:
+                task.notes.append(f"AI resume generation failed: {exc}")
+                resume_text = generate_resume(profile, task.posting, assessment)
+        else:
+            resume_text = generate_resume(profile, task.posting, assessment)
         resume_path.write_text(resume_text, encoding="utf-8")
         task.resume_path = str(resume_path)
 
-        cover_letter = generate_cover_letter(profile, task.posting, assessment)
+        if self.ai_generator is not None:
+            try:
+                cover_letter = self.ai_generator.generate_cover_letter(profile, task.posting, assessment)
+            except DocumentGenerationError as exc:
+                task.notes.append(f"AI cover letter generation failed: {exc}")
+                cover_letter = generate_cover_letter(profile, task.posting, assessment)
+        else:
+            cover_letter = generate_cover_letter(profile, task.posting, assessment)
         cover_path.write_text(cover_letter, encoding="utf-8")
         task.cover_letter_path = str(cover_path)
 

@@ -4,9 +4,9 @@ Jobofcron is a roadmap for an automated job application assistant that tailors e
 
 ## System Overview
 - **User profile manager** – stores personal information, work history, skills, certifications, felony-friendly notes, and preferred industries. This evolves over time by asking the user for missing details.
-- **Job discovery engine** – searches Google for job + location queries, prioritising results that land on company career sites so we can apply directly and avoid aggregator anti-bot hurdles.
+- **Job discovery engine** – searches Google (via SerpAPI) *and* Craigslist for job + location queries, prioritising company career pages so we can apply directly and avoid aggregator anti-bot hurdles.
 - **Evaluation & matching** – compares job descriptions with the stored talent/skills inventory to determine fit and to decide whether to request more info from the user.
-- **Resume & cover letter generator** – adapts resume sections and cover letters using the known profile plus any job-specific prompts from the user and saves reusable drafts for each opportunity.
+- **Resume & cover letter generator** – adapts resume sections and cover letters using the known profile plus any job-specific prompts from the user and saves reusable drafts for each opportunity. When an OpenAI API key is configured, the generator can switch to AI-authored Markdown drafts.
 - **Application scheduler & queue** – queues applications, spaces them out with configurable breaks, persists the backlog, and tracks submission history to avoid rate limits.
 - **Browser automation** – drives Playwright to fill in company career portals directly, supporting dry runs when you simply want to generate documents.
 - **Audit trail** – keeps a running ledger of applied jobs, outcomes, and newly discovered skills for future iterations.
@@ -28,11 +28,11 @@ Initial scaffolding for the automation toolkit now lives under ``src/jobofcron``
 - ``scheduler.py`` – spaces applications over time with configurable breaks.
 - ``storage.py`` – persists profiles, skill snapshots, and the queued application backlog to JSON for iterative learning.
 - ``cli.py`` – a command line utility for updating preferences, adding skills, planning application pacing, generating tailored documents, queueing applications, and sourcing direct-apply leads from Google.
-- ``job_search.py`` – SerpAPI-backed helpers that query Google, flag aggregator domains, and filter for company-owned listings.
+- ``job_search.py`` – helpers for Google (SerpAPI) and Craigslist searches, including aggregator filtering for company-owned listings.
 - ``job_matching.py`` – heuristics that analyse job descriptions, surface questions for the candidate, and suggest resume updates.
-- ``document_generation.py`` – renders quick-turn resume and cover-letter drafts tailored to a posting and the stored profile.
+- ``document_generation.py`` – renders quick-turn resume and cover-letter drafts tailored to a posting and the stored profile, with optional AI-powered generation when an OpenAI key is available.
 - ``application_queue.py`` – manages the persisted queue of scheduled applications and their statuses.
-- ``application_automation.py`` – wraps Playwright for direct company-site submissions.
+- ``application_automation.py`` – wraps Playwright for direct company-site submissions, including dedicated flows for Greenhouse and Lever.
 - ``worker.py`` – background runner that refreshes documents and processes the queue over time.
 
 ### Running the CLI
@@ -45,9 +45,12 @@ python -m jobofcron.cli add-skill "Customer Success"
 python -m jobofcron.cli plan --titles "Success Manager" "Support Lead" --companies "Acme" "Globex"
 python -m jobofcron.cli analyze --title "Customer Success Manager" --company "Acme" --location "Remote" --salary '$70,000 - $90,000' --description-file posting.txt
 python -m jobofcron.cli generate-docs --title "Customer Success Manager" --company "Acme" --location "Remote" --salary '$70,000 - $90,000' --description-file posting.txt --output-dir generated_documents --enqueue --apply-at 2024-05-01T09:30 --apply-url https://careers.example.com/apply
+python -m jobofcron.cli generate-docs --title "Customer Success Manager" --company "Acme" --location "Remote" --salary '$70,000 - $90,000' --description-file posting.txt --use-ai --ai-model gpt-4o-mini --output-dir generated_documents
 python -m jobofcron.cli apply --queue-id "Customer Success Manager@Acme" --dry-run
 python -m jobofcron.cli worker --loop --interval 600 --documents-dir generated_documents
 python -m jobofcron.cli search --title "Customer Success Manager" --location "Austin, TX" --limit 5 --direct-only --sample-response samples/serpapi_demo_response.json --verbose
+python -m jobofcron.cli search --title "Automation Technician" --location "Portland" --provider craigslist --limit 10
+python -m jobofcron.cli record-outcome --queue-id "Customer Success Manager@Acme" --outcome interview --note "Intro call completed" --skills "Customer Success" "SaaS onboarding"
 ```
 
 If you prefer not to install the package, prefix commands with
@@ -61,12 +64,19 @@ regular demand. When providing shell arguments that contain ``$`` (such as
 salary ranges), wrap them in single quotes so the shell does not treat them as
 environment variable lookups.
 
-The ``search`` command uses [SerpAPI](https://serpapi.com/) to run Google queries
-like "Customer Success Manager job Austin, TX". Set ``SERPAPI_KEY`` in your
-environment (or pass ``--serpapi-key``) to perform live searches, or provide a
-saved response via ``--sample-response`` for offline experimentation. Results are
-tagged as ``DIRECT`` when the detected domain is not a known aggregator, helping
-you focus on company-owned application flows.
+The ``search`` command can call [SerpAPI](https://serpapi.com/) for Google
+results *or* scrape Craigslist directly. Set ``SERPAPI_KEY`` in your environment
+(or pass ``--serpapi-key``) to perform live Google searches, or provide a saved
+response via ``--sample-response`` for offline experimentation. Craigslist
+searches accept a site slug (e.g. ``--craigslist-site austin``) and do not
+require an API key. Google results are tagged as ``DIRECT`` when the detected
+domain is not a known aggregator, helping you focus on company-owned application
+flows.
+
+To let Jobofcron draft documents with OpenAI, install the ``ai`` optional
+dependency (``pip install --editable .[ai]``) and set ``OPENAI_API_KEY``. Use
+``--use-ai``/``--ai-docs`` with the CLI or the Streamlit toggle in the Documents
+tab to switch between template-based drafts and AI-authored Markdown.
 
 ### Streamlit control centre
 
@@ -83,13 +93,15 @@ The app offers:
 - **Profile editor** – update contact details, salary expectations, and location
   preferences without touching JSON files.
 - **Job search** – run SerpAPI-backed Google searches (or upload saved JSON
-  responses) and focus on company-owned application flows.
+  responses) and Craigslist scrapes, focusing on company-owned application flows.
 - **Job analysis** – paste descriptions, view visual match scores, capture
   follow-up questions, and queue promising postings for automation.
+- **Documents** – generate resumes and cover letters from templates or OpenAI,
+  save them to disk, download previews, and queue applications in one step.
 - **Skills dashboard** – review in-demand skills, add notes, and log interviews
   or offers to guide future tailoring.
 - **Application queue planner** – inspect pending submissions, reschedule,
-  record successes, and export search results to CSV for offline sharing.
+  record interviews/offers/declines, and export search results to CSV for offline sharing.
 
 ### Automation Extras
 
@@ -105,8 +117,8 @@ documents without launching a browser session. Failed attempts are automatically
 rescheduled based on the configured retry delay.
 
 ## Next Steps
-- Add Craigslist and other regional job board search integrations to broaden sourcing.
-- Expand Playwright recipes for common applicant tracking systems (Greenhouse, Lever, Workday, iCIMS).
-- Capture post-submission outcomes (interviews, offers) to feed back into the skills inventory and scheduling heuristics.
+- Expand Playwright recipes for additional applicant tracking systems (Workday, iCIMS).
+- Add stealth/anti-bot browser hardening for sensitive portals.
+- Integrate additional AI providers and prompt templates for specialised roles.
 
 These building blocks provide the "pieces" you can follow as we iterate toward the working product.

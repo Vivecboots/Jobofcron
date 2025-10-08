@@ -20,6 +20,8 @@ class QueuedApplication:
     notes: List[str] = field(default_factory=list)
     attempts: int = 0
     last_error: Optional[str] = None
+    outcome: Optional[str] = None
+    outcome_recorded_at: Optional[datetime] = None
 
     @property
     def job_id(self) -> str:
@@ -32,6 +34,8 @@ class QueuedApplication:
         self.attempts += 1
         self.last_error = None
         self.notes.append(f"Applied successfully on {datetime.now().isoformat(timespec='seconds')}")
+        self.outcome = "applied"
+        self.outcome_recorded_at = datetime.now()
 
     def mark_failure(self, error: str) -> None:
         self.status = "pending"
@@ -41,6 +45,17 @@ class QueuedApplication:
 
     def defer(self, new_time: datetime) -> None:
         self.apply_at = new_time
+
+    def record_outcome(self, outcome: str, *, note: Optional[str] = None) -> None:
+        outcome_normalised = outcome.strip().lower()
+        timestamp = datetime.now().isoformat(timespec="seconds")
+        self.outcome = outcome_normalised
+        self.outcome_recorded_at = datetime.now()
+        self.status = outcome_normalised
+        base_note = f"Outcome recorded ({outcome_normalised}) on {timestamp}."
+        self.notes.append(base_note)
+        if note and note.strip():
+            self.notes.append(note.strip())
 
     def to_dict(self) -> dict:
         return {
@@ -62,6 +77,10 @@ class QueuedApplication:
             "notes": list(self.notes),
             "attempts": self.attempts,
             "last_error": self.last_error,
+            "outcome": self.outcome,
+            "outcome_recorded_at": self.outcome_recorded_at.isoformat()
+            if self.outcome_recorded_at
+            else None,
         }
 
     @classmethod
@@ -88,6 +107,10 @@ class QueuedApplication:
             notes=list(payload.get("notes", [])),
             attempts=payload.get("attempts", 0),
             last_error=payload.get("last_error"),
+            outcome=payload.get("outcome"),
+            outcome_recorded_at=datetime.fromisoformat(payload["outcome_recorded_at"])
+            if payload.get("outcome_recorded_at")
+            else None,
         )
 
 

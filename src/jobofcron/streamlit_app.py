@@ -23,20 +23,40 @@ PACKAGE_DIR = Path(__file__).resolve().parent
 if __package__ in {None, ""}:
     sys.path.append(str(PACKAGE_DIR.parent))
     from jobofcron.application_queue import ApplicationQueue, QueuedApplication  # type: ignore[attr-defined]
+    from jobofcron.document_generation import (  # type: ignore[attr-defined]
+        AIDocumentGenerator,
+        DocumentGenerationDependencyError,
+        DocumentGenerationError,
+        generate_cover_letter,
+        generate_resume,
+    )
     from jobofcron.job_matching import JobPosting, analyse_job_fit  # type: ignore[attr-defined]
-    from jobofcron.job_search import GoogleJobSearch, SearchResult  # type: ignore[attr-defined]
+    from jobofcron.job_search import CraigslistSearch, GoogleJobSearch, SearchResult  # type: ignore[attr-defined]
     from jobofcron.profile import CandidateProfile  # type: ignore[attr-defined]
     from jobofcron.skills_inventory import SkillsInventory  # type: ignore[attr-defined]
     from jobofcron.storage import Storage  # type: ignore[attr-defined]
 else:
     from .application_queue import ApplicationQueue, QueuedApplication
+    from .document_generation import (
+        AIDocumentGenerator,
+        DocumentGenerationDependencyError,
+        DocumentGenerationError,
+        generate_cover_letter,
+        generate_resume,
+    )
     from .job_matching import JobPosting, analyse_job_fit
-    from .job_search import GoogleJobSearch, SearchResult
+    from .job_search import CraigslistSearch, GoogleJobSearch, SearchResult
     from .profile import CandidateProfile
     from .skills_inventory import SkillsInventory
     from .storage import Storage
 
 DEFAULT_STORAGE = Path(os.getenv("JOBOFCRON_STORAGE", "jobofcron_data.json"))
+
+
+def _slugify(*parts: str) -> str:
+    token = "-".join(part.strip().lower().replace(" ", "-") for part in parts if part)
+    cleaned = [ch for ch in token if ch.isalnum() or ch in {"-", "_"}]
+    return "".join(cleaned) or "document"
 
 
 def _load_state(path: Path) -> tuple[CandidateProfile, SkillsInventory, ApplicationQueue, Storage]:
@@ -167,30 +187,43 @@ def _render_profile_tab() -> None:
 
 
 def _run_search(
+    *,
+    provider: str,
     title: str,
     location: str,
     limit: int,
     remote: bool,
     direct_only: bool,
     extra_terms: Iterable[str],
-    serpapi_key: str,
+    serpapi_key: Optional[str],
     sample_payload: Optional[dict],
+    craigslist_site: Optional[str],
 ) -> List[SearchResult]:
-    if sample_payload is not None:
-        results = GoogleJobSearch.parse_results(sample_payload)
-    else:
-        searcher = GoogleJobSearch(serpapi_key)
-        results = searcher.search_jobs(
-            title=title,
-            location=location,
-            max_results=limit,
-            remote=remote,
-            extra_terms=[term for term in extra_terms if term],
-        )
+    if provider == "google":
+        if sample_payload is not None:
+            results = GoogleJobSearch.parse_results(sample_payload)
+        else:
+            if not serpapi_key:
+                raise ValueError("Provide a SerpAPI key or sample response for Google searches.")
+            searcher = GoogleJobSearch(serpapi_key)
+            results = searcher.search_jobs(
+                title=title,
+                location=location,
+                max_results=limit,
+                remote=remote,
+                extra_terms=[term for term in extra_terms if term],
+            )
+        if direct_only:
+            results = GoogleJobSearch.filter_direct_apply(results)
+        return results[:limit]
 
-    if direct_only:
-        results = GoogleJobSearch.filter_direct_apply(results)
-    return results[:limit]
+    searcher = CraigslistSearch(location=location, site_hint=craigslist_site)
+    return searcher.search_jobs(
+        title=title,
+        max_results=limit,
+        remote=remote,
+        extra_terms=[term for term in extra_terms if term],
+    )
 
 
 def _render_search_tab() -> None:
@@ -204,19 +237,35 @@ def _render_search_tab() -> None:
         )
         limit = st.slider("Result limit", min_value=1, max_value=20, value=10)
         remote = st.checkbox("Prefer remote roles", value="Remote" in profile.job_preferences.locations)
-        direct_only = st.checkbox("Company sites only", value=True)
+        provider_label = st.selectbox("Provider", ["Google (SerpAPI)", "Craigslist"], index=0)
+        provider = "google" if provider_label.startswith("Google") else "craigslist"
+        direct_only = st.checkbox(
+            "Company sites only",
+            value=True,
+            disabled=provider != "google",
+            help="Craigslist results already point directly to employers.",
+        )
         extra_terms_text = st.text_input(
             "Extra search terms",
             value=" ".join(profile.job_preferences.focus_domains),
             help="Optional additional keywords (e.g. industry, company).",
         )
-        serpapi_key = st.text_input(
-            "SerpAPI key",
-            value=os.getenv("SERPAPI_KEY", ""),
-            type="password",
-            help="Provide an API key for live Google searches or upload a saved response below.",
-        )
-        sample_response = st.file_uploader("Sample SerpAPI response (JSON)", type="json")
+        serpapi_key = ""
+        sample_response: Optional[dict] = None
+        craigslist_site = None
+        uploaded_file = None
+        if provider == "google":
+            serpapi_key = st.text_input(
+                "SerpAPI key",
+                value=os.getenv("SERPAPI_KEY", ""),
+                type="password",
+                help="Provide an API key for live Google searches or upload a saved response below.",
+            )
+            uploaded_file = st.file_uploader("Sample SerpAPI response (JSON)", type="json")
+        else:
+            craigslist_site = st.text_input(
+                "Craigslist site", value=location.split(",")[0].lower() if location else "", help="e.g. 'austin'"
+            )
 
         submitted = st.form_submit_button("Search")
 
@@ -227,33 +276,36 @@ def _render_search_tab() -> None:
         if not location.strip() and not remote:
             st.warning("Provide a location or enable remote roles for best results.")
 
-        payload: Optional[dict] = None
-        if sample_response is not None:
-            try:
-                payload = json.load(sample_response)
-            except json.JSONDecodeError as exc:  # pragma: no cover - user input
-                st.error(f"Could not parse uploaded JSON: {exc}")
+        if provider == "google":
+            if uploaded_file is not None:
+                try:
+                    sample_response = json.load(uploaded_file)
+                except json.JSONDecodeError as exc:  # pragma: no cover - user input
+                    st.error(f"Could not parse uploaded JSON: {exc}")
+                    return
+            elif not serpapi_key.strip():
+                st.error("Provide either a SerpAPI key or a sample response.")
                 return
-        elif not serpapi_key.strip():
-            st.error("Provide either a SerpAPI key or a sample response.")
-            return
 
         try:
             results = _run_search(
+                provider=provider,
                 title=title.strip(),
                 location=location.strip(),
                 limit=limit,
                 remote=remote,
                 direct_only=direct_only,
                 extra_terms=extra_terms_text.split(),
-                serpapi_key=serpapi_key.strip(),
-                sample_payload=payload,
+                serpapi_key=serpapi_key.strip() or None,
+                sample_payload=sample_response,
+                craigslist_site=craigslist_site,
             )
         except Exception as exc:  # pragma: no cover - network errors
             st.error(f"Search failed: {exc}")
             return
 
         st.session_state.search_results = results
+        st.session_state.search_provider = provider
         if results:
             st.success(f"Found {len(results)} results.")
         else:
@@ -406,6 +458,130 @@ def _render_analysis_tab() -> None:
                 st.success(f"Queued {queued.job_id} for {schedule_time.isoformat(timespec='minutes')}.")
 
 
+def _render_documents_tab() -> None:
+    profile: CandidateProfile = st.session_state.profile
+    inventory: SkillsInventory = st.session_state.inventory
+    queue: ApplicationQueue = st.session_state.queue
+
+    results = st.session_state.get("search_results", [])
+    options = ["Manual entry"] + [f"{res.title} ({res.source})" for res in results]
+    selection = st.selectbox("Source", options)
+    selected: Optional[SearchResult] = None
+    if selection != "Manual entry":
+        selected = results[options.index(selection) - 1]
+
+    with st.form("documents_form"):
+        title = st.text_input("Job title", value=selected.title if selected else "")
+        company = st.text_input("Company", value="")
+        location = st.text_input("Location", value="")
+        salary = st.text_input("Salary info", value="")
+        apply_url = st.text_input("Apply URL", value=selected.link if selected else "")
+        description = st.text_area(
+            "Job description",
+            value=selected.snippet if selected else "",
+            height=220,
+        )
+        tags_text = st.text_input("Tags", value="")
+        use_ai = st.checkbox(
+            "Use AI generator",
+            value=bool(os.getenv("OPENAI_API_KEY")),
+            help="Requires the openai package and an API key.",
+        )
+        ai_model = st.text_input("AI model", value="gpt-4o-mini", disabled=not use_ai)
+        ai_temperature = st.slider("AI creativity", min_value=0.0, max_value=1.0, value=0.3, step=0.05, disabled=not use_ai)
+        ai_key = st.text_input(
+            "AI API key",
+            value=os.getenv("OPENAI_API_KEY", ""),
+            type="password",
+            disabled=not use_ai,
+        )
+        output_dir = st.text_input("Output directory", value="generated_documents")
+        enqueue = st.checkbox("Add to queue", value=False)
+        schedule_time = datetime.now()
+        if enqueue:
+            schedule_time = st.datetime_input(
+                "Schedule application for",
+                value=datetime.now(),
+                key="documents_schedule_time",
+            )
+        submitted = st.form_submit_button("Generate documents")
+
+    if not submitted:
+        return
+
+    if not title.strip() or not company.strip():
+        st.error("Provide both a job title and company name.")
+        return
+    if not description.strip():
+        st.error("Paste the job description for better tailoring.")
+        return
+    if enqueue and not apply_url.strip():
+        st.error("Provide an apply URL when adding the job to the queue.")
+        return
+
+    posting = JobPosting(
+        title=title.strip(),
+        company=company.strip(),
+        location=location.strip() or None,
+        salary_text=salary.strip() or None,
+        description=description,
+        tags=[tag.strip() for tag in tags_text.split(",") if tag.strip()],
+        apply_url=apply_url.strip() or (selected.link if selected else None),
+    )
+    assessment = analyse_job_fit(profile, posting)
+    inventory.observe_skills(assessment.required_skills)
+
+    generator: Optional[AIDocumentGenerator] = None
+    resume_text: str
+    cover_text: str
+    if use_ai:
+        try:
+            generator = AIDocumentGenerator(api_key=ai_key or None, model=ai_model, temperature=ai_temperature)
+        except DocumentGenerationDependencyError as exc:
+            st.error(str(exc))
+            return
+        try:
+            resume_text = generator.generate_resume(profile, posting, assessment)
+            cover_text = generator.generate_cover_letter(profile, posting, assessment)
+        except DocumentGenerationError as exc:
+            st.error(str(exc))
+            return
+    else:
+        resume_text = generate_resume(profile, posting, assessment)
+        cover_text = generate_cover_letter(profile, posting, assessment)
+
+    directory = Path(output_dir.strip() or "generated_documents")
+    directory.mkdir(parents=True, exist_ok=True)
+    slug = _slugify(posting.title, posting.company)
+    resume_path = directory / f"{slug}_resume.md"
+    cover_path = directory / f"{slug}_cover_letter.md"
+    resume_path.write_text(resume_text, encoding="utf-8")
+    cover_path.write_text(cover_text, encoding="utf-8")
+
+    st.success("Documents generated.")
+    st.write(f"Resume saved to {resume_path}")
+    st.write(f"Cover letter saved to {cover_path}")
+
+    st.download_button("Download resume", data=resume_text.encode("utf-8"), file_name=resume_path.name)
+    st.download_button("Download cover letter", data=cover_text.encode("utf-8"), file_name=cover_path.name)
+
+    if enqueue:
+        queued = QueuedApplication(
+            posting=posting,
+            apply_at=schedule_time,
+            resume_path=str(resume_path),
+            cover_letter_path=str(cover_path),
+        )
+        if use_ai and generator:
+            queued.notes.append(f"Documents generated with AI model {generator.model}.")
+        queue.add(queued)
+        st.success(f"Queued {queued.job_id} for {schedule_time.isoformat(timespec='minutes')}.")
+
+    st.session_state.profile = profile
+    st.session_state.inventory = inventory
+    st.session_state.queue = queue
+    _save_state()
+
 def _render_skills_tab() -> None:
     inventory: SkillsInventory = st.session_state.inventory
 
@@ -448,6 +624,7 @@ def _render_skills_tab() -> None:
 
 def _render_queue_tab() -> None:
     queue: ApplicationQueue = st.session_state.queue
+    inventory: SkillsInventory = st.session_state.inventory
 
     pending = queue.items
     if not pending:
@@ -469,6 +646,13 @@ def _render_queue_tab() -> None:
                     st.write(f"- {note}")
             if application.last_error:
                 st.error(f"Last error: {application.last_error}")
+            if application.outcome:
+                recorded = (
+                    application.outcome_recorded_at.isoformat(timespec="minutes")
+                    if application.outcome_recorded_at
+                    else "unknown"
+                )
+                st.info(f"Outcome: {application.outcome} (recorded {recorded})")
 
             col1, col2, col3 = st.columns(3)
             if col1.button("Mark applied", key=f"queue_apply_{idx}"):
@@ -482,6 +666,28 @@ def _render_queue_tab() -> None:
                 st.success(f"Rescheduled for {new_time.isoformat(timespec='minutes')}.")
             if col3.button("Remove", key=f"queue_remove_{idx}"):
                 queue.items.pop(idx)
+                _save_state()
+                st.experimental_rerun()
+
+            outcome_cols = st.columns(4)
+            if outcome_cols[0].button("Interview", key=f"queue_outcome_interview_{idx}"):
+                application.record_outcome("interview")
+                for skill in application.posting.tags:
+                    inventory.record_interview(skill)
+                _save_state()
+                st.experimental_rerun()
+            if outcome_cols[1].button("Offer", key=f"queue_outcome_offer_{idx}"):
+                application.record_outcome("offer")
+                for skill in application.posting.tags:
+                    inventory.record_offer(skill)
+                _save_state()
+                st.experimental_rerun()
+            if outcome_cols[2].button("Rejected", key=f"queue_outcome_rejected_{idx}"):
+                application.record_outcome("rejected")
+                _save_state()
+                st.experimental_rerun()
+            if outcome_cols[3].button("Ghosted", key=f"queue_outcome_ghosted_{idx}"):
+                application.record_outcome("ghosted")
                 _save_state()
                 st.experimental_rerun()
 
@@ -504,6 +710,7 @@ def main() -> None:
             "Profile",
             "Job search",
             "Job analysis",
+            "Documents",
             "Skills dashboard",
             "Application queue",
         ]
@@ -516,8 +723,10 @@ def main() -> None:
     with tabs[2]:
         _render_analysis_tab()
     with tabs[3]:
-        _render_skills_tab()
+        _render_documents_tab()
     with tabs[4]:
+        _render_skills_tab()
+    with tabs[5]:
         _render_queue_tab()
 
 

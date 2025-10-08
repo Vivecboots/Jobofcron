@@ -20,6 +20,9 @@ automation = [
 ui = [
     "streamlit>=1.32",
 ]
+ai = [
+    "openai>=1.14",
+]
 
 [tool.setuptools.packages.find]
 where = ["src"]

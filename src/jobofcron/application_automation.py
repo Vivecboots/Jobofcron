@@ -4,6 +4,7 @@ from __future__ import annotations
 import asyncio
 from pathlib import Path
 from typing import Mapping, Optional
+from urllib.parse import urlparse
 
 from .job_matching import JobPosting
 from .profile import CandidateProfile
@@ -79,19 +80,115 @@ class DirectApplyAutomation:
             page = await browser.new_page()
             try:
                 await page.goto(posting.apply_url, wait_until="domcontentloaded", timeout=self.timeout * 1000)
-                await self._fill_contact_info(page, profile)
-                if resume_path:
-                    await self._upload_file(page, resume_path, keywords=("resume",))
-                if cover_letter_path:
-                    await self._upload_file(page, cover_letter_path, keywords=("cover", "letter"))
-                if answers:
-                    await self._answer_questions(page, answers)
-                submitted = await self._submit_application(page)
-                return submitted
+                handler = self._select_handler(posting.apply_url)
+                return await handler(
+                    page,
+                    profile,
+                    resume_path=resume_path,
+                    cover_letter_path=cover_letter_path,
+                    answers=answers,
+                )
             except PlaywrightTimeoutError as exc:
                 raise TimeoutError(f"Timed out while loading or submitting {posting.apply_url}") from exc
             finally:
                 await browser.close()
+
+    def _select_handler(self, url: str):
+        domain = urlparse(url).netloc.lower()
+        if "greenhouse.io" in domain:
+            return self._apply_greenhouse
+        if "lever.co" in domain:
+            return self._apply_lever
+        return self._apply_generic
+
+    async def _apply_generic(
+        self,
+        page,
+        profile: CandidateProfile,
+        *,
+        resume_path: Optional[Path],
+        cover_letter_path: Optional[Path],
+        answers: Mapping[str, str],
+    ) -> bool:
+        await self._fill_contact_info(page, profile)
+        if resume_path:
+            await self._upload_file(page, resume_path, keywords=("resume",))
+        if cover_letter_path:
+            await self._upload_file(page, cover_letter_path, keywords=("cover", "letter"))
+        if answers:
+            await self._answer_questions(page, answers)
+        return await self._submit_application(page)
+
+    async def _apply_greenhouse(
+        self,
+        page,
+        profile: CandidateProfile,
+        *,
+        resume_path: Optional[Path],
+        cover_letter_path: Optional[Path],
+        answers: Mapping[str, str],
+    ) -> bool:
+        await page.wait_for_selector("form", timeout=self.timeout * 1000)
+        await page.fill("input[name='first_name']", profile.name.split(" ")[0])
+        await page.fill("input[name='last_name']", profile.name.split(" ")[-1])
+        await page.fill("input[name='email']", profile.email)
+        if profile.phone:
+            await page.fill("input[name='phone']", profile.phone)
+
+        if resume_path:
+            try:
+                await page.set_input_files("input[type='file'][name='resume']", str(resume_path))
+            except Exception:
+                await self._upload_file(page, resume_path, keywords=("resume",))
+        if cover_letter_path:
+            try:
+                await page.set_input_files("input[type='file'][name='cover_letter']", str(cover_letter_path))
+            except Exception:
+                await self._upload_file(page, cover_letter_path, keywords=("cover",))
+
+        if answers:
+            await self._answer_questions(page, answers)
+
+        try:
+            await page.click("button[type='submit']")
+            return True
+        except Exception:
+            return await self._submit_application(page)
+
+    async def _apply_lever(
+        self,
+        page,
+        profile: CandidateProfile,
+        *,
+        resume_path: Optional[Path],
+        cover_letter_path: Optional[Path],
+        answers: Mapping[str, str],
+    ) -> bool:
+        await page.wait_for_selector("form", timeout=self.timeout * 1000)
+        await page.fill("input[name='name']", profile.name)
+        await page.fill("input[name='email']", profile.email)
+        if profile.phone:
+            await page.fill("input[name='phone']", profile.phone)
+
+        if resume_path:
+            try:
+                await page.set_input_files("input[type='file'][name='resume']", str(resume_path))
+            except Exception:
+                await self._upload_file(page, resume_path, keywords=("resume",))
+        if cover_letter_path:
+            try:
+                await page.set_input_files("input[type='file'][name='coverLetter']", str(cover_letter_path))
+            except Exception:
+                await self._upload_file(page, cover_letter_path, keywords=("cover", "letter"))
+
+        if answers:
+            await self._answer_questions(page, answers)
+
+        try:
+            await page.click("button[type='submit']")
+            return True
+        except Exception:
+            return await self._submit_application(page)
 
     async def _fill_contact_info(self, page, profile: CandidateProfile) -> None:
         fields = {
